@@ -1,161 +1,285 @@
-import os, time
-from typing import Dict, Any, Optional
-from fastapi import FastAPI, Header, HTTPException
+import os
+import json
+import logging
+from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from typing import Optional, Dict, Any, List
 from web3 import Web3
+import httpx
 
-app = FastAPI(title="SLH API")
+# הגדרת לוגר
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
-SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS", "").strip()
-BSC_RPC_URL = os.getenv("BSC_RPC_URL", "").strip()  # mainnet/testnet
-GROUP_INVITE_LINK_ENV = os.getenv("GROUP_INVITE_LINK", "").strip()
-DEFAULT_MIN_NIS = int(os.getenv("MIN_NIS_TO_UNLOCK", "39") or 39)
+app = FastAPI(title="SLH API", version="1.0.0")
 
-# ===== simple RAM stores (MVP) =====
-CONFIG: Dict[str, Any] = {
-    "price_nis": 444.0,
-    "min_nis": DEFAULT_MIN_NIS,
-    "group_invite_link": GROUP_INVITE_LINK_ENV or "",
-    "accounts": []  # textual bank/pay channels
-}
-UNLOCKED: Dict[int, bool] = {}
-PENDING: Dict[int, Dict[str, Any]] = {}
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# ===== web3 init (lazy) =====
-_w3: Optional[Web3] = None
-_erc20_abi = [
-    {"constant": True,"inputs": [],"name":"decimals","outputs":[{"name":"","type":"uint8"}],"stateMutability":"view","type":"function"},
-    {"constant": True,"inputs": [],"name":"symbol","outputs":[{"name":"","type":"string"}],"stateMutability":"view","type":"function"},
-    {"constant": True,"inputs": [{"name":"owner","type":"address"}],"name":"balanceOf","outputs":[{"name":"","type":"uint256"}],"stateMutability":"view","type":"function"},
+# נתיבים לקבצי נתונים
+DATA_DIR = "data"
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+UNLOCKED_FILE = os.path.join(DATA_DIR, "unlocked.json")
+
+# וידוא שתיקיית data קיימת
+os.makedirs(DATA_DIR, exist_ok=True)
+
+# אתחול Web3
+BSC_RPC_URL = os.getenv("BSC_RPC_URL")
+SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS")
+w3 = Web3(Web3.HTTPProvider(BSC_RPC_URL))
+
+# ABI בסיסי לטוקן ERC-20
+ERC20_ABI = [
+    {
+        "constant": True,
+        "inputs": [{"name": "_owner", "type": "address"}],
+        "name": "balanceOf",
+        "outputs": [{"name": "balance", "type": "uint256"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "decimals",
+        "outputs": [{"name": "", "type": "uint8"}],
+        "type": "function"
+    }
 ]
 
-def get_w3() -> Web3:
-    global _w3
-    if _w3 is None:
-        if not BSC_RPC_URL:
-            raise HTTPException(status_code=500, detail="BSC_RPC_URL not configured")
-        _w3 = Web3(Web3.HTTPProvider(BSC_RPC_URL, request_kwargs={"timeout": 10}))
-        if not _w3.is_connected():
-            raise HTTPException(status_code=500, detail="Failed to connect BSC RPC")
-    return _w3
+# מודלים
+class ConfigUpdate(BaseModel):
+    sela_price_nis: Optional[float] = None
+    min_nis_to_unlock: Optional[int] = None
+    community_invite_link: Optional[str] = None
+    payment_accounts: Optional[List[Dict]] = None
 
-def erc20_balance(addr: str) -> Dict[str, Any]:
-    if not Web3.is_address(addr):
-        raise HTTPException(status_code=400, detail="invalid address")
-    if not SELA_TOKEN_ADDRESS:
-        raise HTTPException(status_code=500, detail="SELA_TOKEN_ADDRESS not configured")
-    w3 = get_w3()
-    token = w3.eth.contract(address=Web3.to_checksum_address(SELA_TOKEN_ADDRESS), abi=_erc20_abi)
-    balance = token.functions.balanceOf(Web3.to_checksum_address(addr)).call()
-    decimals = int(token.functions.decimals().call())
-    symbol = token.functions.symbol().call()
-    return {"ok": True, "balance": int(balance), "decimals": decimals, "symbol": symbol}
-
-# ===== models =====
-class PriceReq(BaseModel):
-    price_nis: float
-
-class MinReq(BaseModel):
-    min_nis: int
-
-class GroupReq(BaseModel):
-    invite: str
-
-class AccountReq(BaseModel):
-    type: str
-    details: str
-
-class UnlockVerifyReq(BaseModel):
+class UnlockRequest(BaseModel):
     chat_id: int
-    reference: Optional[str] = None
-    amount_nis: Optional[int] = None
+    wallet_address: str
+    payment_ref: Optional[str] = None
 
-class GrantReq(BaseModel):
-    chat_id: int
+# פונקציות עזר
+def load_config():
+    """טעינת קונפיג מהקובץ"""
+    try:
+        if os.path.exists(CONFIG_FILE):
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading config: {e}")
+    
+    # קונפיג ברירת מחדל
+    default_config = {
+        "sela_price_nis": 4.0,
+        "min_nis_to_unlock": 39,
+        "community_invite_link": "",
+        "payment_accounts": []
+    }
+    save_config(default_config)
+    return default_config
 
-def require_admin(token: str):
-    if not ADMIN_TOKEN or token != ADMIN_TOKEN:
-        raise HTTPException(status_code=403, detail="forbidden")
+def save_config(config):
+    """שמירת קונפיג לקובץ"""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving config: {e}")
+        return False
 
-# ===== health =====
+def load_unlocked():
+    """טעינת רשימת משתמשים מאושרים"""
+    try:
+        if os.path.exists(UNLOCKED_FILE):
+            with open(UNLOCKED_FILE, 'r', encoding='utf-8') as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Error loading unlocked: {e}")
+    
+    return {"approved": [], "pending": []}
+
+def save_unlocked(data):
+    """שמירת רשימת משתמשים מאושרים"""
+    try:
+        with open(UNLOCKED_FILE, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        logger.error(f"Error saving unlocked: {e}")
+        return False
+
+# Dependency for admin authentication
+def verify_admin_token(x_admin_token: str = Header(...)):
+    if x_admin_token != os.getenv("ADMIN_TOKEN"):
+        raise HTTPException(status_code=403, detail="Admin token required")
+    return True
+
+# endpoints
 @app.get("/healthz")
-def healthz():
-    return {"ok": True, "msg": "slh api up"}
+async def health_check():
+    return {"status": "healthy", "service": "SLH API"}
 
-# ===== config =====
 @app.get("/config")
-def get_config():
-    return CONFIG
+async def get_config():
+    return load_config()
+
+@app.post("/config")
+async def update_config(
+    update: ConfigUpdate,
+    is_admin: bool = Depends(verify_admin_token)
+):
+    config = load_config()
+    
+    if update.sela_price_nis is not None:
+        config["sela_price_nis"] = update.sela_price_nis
+    if update.min_nis_to_unlock is not None:
+        config["min_nis_to_unlock"] = update.min_nis_to_unlock
+    if update.community_invite_link is not None:
+        config["community_invite_link"] = update.community_invite_link
+    if update.payment_accounts is not None:
+        config["payment_accounts"] = update.payment_accounts
+    
+    if save_config(config):
+        return {"status": "updated", "config": config}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to save config")
 
 @app.get("/config/price")
-def get_price():
-    return {"ok": True, "price_nis": CONFIG.get("price_nis")}
+async def get_price():
+    config = load_config()
+    return {"sela_price_nis": config["sela_price_nis"]}
 
 @app.post("/config/price")
-def set_price(req: PriceReq, x_admin_token: str = Header(default="")):
-    require_admin(x_admin_token)
-    CONFIG["price_nis"] = float(req.price_nis)
-    return {"ok": True, "price_nis": CONFIG["price_nis"]}
+async def set_price(price_data: dict, is_admin: bool = Depends(verify_admin_token)):
+    config = load_config()
+    config["sela_price_nis"] = price_data.get("sela_price_nis", config["sela_price_nis"])
+    
+    if save_config(config):
+        return {"status": "price_updated", "new_price": config["sela_price_nis"]}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to update price")
 
-@app.get("/config/min")
-def get_min():
-    return {"ok": True, "min_nis": CONFIG.get("min_nis", DEFAULT_MIN_NIS)}
+@app.get("/token/balance/{address}")
+async def get_token_balance(address: str):
+    try:
+        # וידוא כתובת תקינה
+        if not Web3.is_address(address):
+            return {"error": "Invalid address", "balance": 0}
+        
+        checksum_address = Web3.to_checksum_address(address)
+        
+        # חוזה טוקן
+        token_contract = w3.eth.contract(
+            address=Web3.to_checksum_address(SELA_TOKEN_ADDRESS),
+            abi=ERC20_ABI
+        )
+        
+        # קבלת יתרה
+        balance = token_contract.functions.balanceOf(checksum_address).call()
+        decimals = token_contract.functions.decimals().call()
+        
+        # המרה לערך אנושי
+        human_balance = balance / (10 ** decimals)
+        
+        return {
+            "address": checksum_address,
+            "balance": human_balance,
+            "raw_balance": balance,
+            "decimals": decimals
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting balance for {address}: {e}")
+        return {"error": str(e), "balance": 0}
 
-@app.post("/config/min")
-def set_min(req: MinReq, x_admin_token: str = Header(default="")):
-    require_admin(x_admin_token)
-    CONFIG["min_nis"] = int(req.min_nis)
-    return {"ok": True, "min_nis": CONFIG["min_nis"]}
-
-@app.get("/config/accounts")
-def get_accounts():
-    return {"ok": True, "accounts": CONFIG.get("accounts", [])}
-
-@app.post("/config/account")
-def add_account(req: AccountReq, x_admin_token: str = Header(default="")):
-    require_admin(x_admin_token)
-    CONFIG.setdefault("accounts", []).append(f"{req.type}: {req.details}")
-    return {"ok": True, "accounts": CONFIG["accounts"]}
-
-@app.post("/config/group")
-def set_group(req: GroupReq, x_admin_token: str = Header(default="")):
-    require_admin(x_admin_token)
-    CONFIG["group_invite_link"] = req.invite.strip()
-    return {"ok": True, "group_invite_link": CONFIG["group_invite_link"]}
-
-# ===== unlock flow =====
-@app.post("/unlock/verify")
-def unlock_verify(req: UnlockVerifyReq):
-    PENDING[req.chat_id] = {
-        "reference": req.reference,
-        "amount_nis": req.amount_nis,
-        "ts": int(time.time())
+@app.get("/unlock/status/{chat_id}")
+async def get_unlock_status(chat_id: int):
+    unlocked_data = load_unlocked()
+    
+    is_approved = any(user["chat_id"] == chat_id for user in unlocked_data["approved"])
+    pending_request = next((user for user in unlocked_data["pending"] if user["chat_id"] == chat_id), None)
+    
+    return {
+        "chat_id": chat_id,
+        "approved": is_approved,
+        "pending": pending_request is not None,
+        "pending_data": pending_request
     }
-    return {"ok": True, "pending": True}
+
+@app.post("/unlock/verify")
+async def verify_unlock(request: UnlockRequest):
+    unlocked_data = load_unlocked()
+    
+    # בדיקה אם כבר מאושר
+    if any(user["chat_id"] == request.chat_id for user in unlocked_data["approved"]):
+        return {"status": "already_approved"}
+    
+    # בדיקה אם כבר ממתין
+    existing_pending = next((user for user in unlocked_data["pending"] if user["chat_id"] == request.chat_id), None)
+    if existing_pending:
+        return {"status": "already_pending"}
+    
+    # הוספה לרשימת ממתינים
+    unlocked_data["pending"].append({
+        "chat_id": request.chat_id,
+        "wallet_address": request.wallet_address,
+        "payment_ref": request.payment_ref,
+        "timestamp": os.times().elapsed
+    })
+    
+    if save_unlocked(unlocked_data):
+        return {"status": "pending_approval"}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to save unlock request")
 
 @app.post("/unlock/grant")
-def unlock_grant(req: GrantReq, x_admin_token: str = Header(default="")):
-    require_admin(x_admin_token)
-    UNLOCKED[req.chat_id] = True
-    PENDING.pop(req.chat_id, None)
-    return {"ok": True, "chat_id": req.chat_id, "unlocked": True}
+async def grant_unlock(chat_id: int, is_admin: bool = Depends(verify_admin_token)):
+    unlocked_data = load_unlocked()
+    
+    # מצא ומחק מרשימת ממתינים
+    pending_user = next((user for user in unlocked_data["pending"] if user["chat_id"] == chat_id), None)
+    if not pending_user:
+        raise HTTPException(status_code=404, detail="No pending request found")
+    
+    unlocked_data["pending"] = [user for user in unlocked_data["pending"] if user["chat_id"] != chat_id]
+    
+    # הוסף לרשימת מאושרים
+    if not any(user["chat_id"] == chat_id for user in unlocked_data["approved"]):
+        unlocked_data["approved"].append({
+            "chat_id": chat_id,
+            "wallet_address": pending_user["wallet_address"],
+            "approved_at": os.times().elapsed,
+            "approved_by": "admin"
+        })
+    
+    if save_unlocked(unlocked_data):
+        return {"status": "approved", "chat_id": chat_id}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to grant unlock")
 
-@app.get("/status/{chat_id}")
-def status(chat_id: int):
-    return {
-        "ok": True,
-        "chat_id": chat_id,
-        "unlocked": bool(UNLOCKED.get(chat_id, False)),
-        "group_invite_link": CONFIG.get("group_invite_link", "")
-    }
+@app.post("/unlock/revoke")
+async def revoke_unlock(chat_id: int, is_admin: bool = Depends(verify_admin_token)):
+    unlocked_data = load_unlocked()
+    
+    # הסרה מרשימת מאושרים
+    unlocked_data["approved"] = [user for user in unlocked_data["approved"] if user["chat_id"] != chat_id]
+    
+    if save_unlocked(unlocked_data):
+        return {"status": "revoked", "chat_id": chat_id}
+    else:
+        raise HTTPException(status_code=500, detail="Failed to revoke unlock")
 
-# ===== token balance =====
-@app.get("/token/balance/{address}")
-def token_balance(address: str):
-    try:
-        return erc20_balance(address)
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.getenv("PORT", 8080))
+    uvicorn.run(app, host="0.0.0.0", port=port)
