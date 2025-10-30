@@ -32,12 +32,22 @@ UNLOCKED_FILE = os.path.join(DATA_DIR, "unlocked.json")
 # וידוא שתיקיית data קיימת
 os.makedirs(DATA_DIR, exist_ok=True)
 
-# אתחול Web3
-BSC_RPC_URL = os.getenv("BSC_RPC_URL")
-SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS")
-w3 = Web3(Web3.HTTPProvider(BSC_RPC_URL))
+# אתחול Web3 עם BSC Mainnet
+BSC_RPC_URL = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
+SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS", "0xACb0A09414CEA1C879c67bB7A877E4e19480f022")
 
-# ABI בסיסי לטוקן ERC-20
+try:
+    w3 = Web3(Web3.HTTPProvider(BSC_RPC_URL))
+    if w3.is_connected():
+        logger.info(f"✅ Connected to BSC Mainnet. Chain ID: {w3.eth.chain_id}")
+    else:
+        logger.error("❌ Failed to connect to BSC")
+        w3 = None
+except Exception as e:
+    logger.error(f"❌ Web3 connection error: {e}")
+    w3 = None
+
+# ABI מלא יותר לטוקן ERC-20
 ERC20_ABI = [
     {
         "constant": True,
@@ -51,6 +61,27 @@ ERC20_ABI = [
         "inputs": [],
         "name": "decimals",
         "outputs": [{"name": "", "type": "uint8"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "symbol",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "name",
+        "outputs": [{"name": "", "type": "string"}],
+        "type": "function"
+    },
+    {
+        "constant": True,
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [{"name": "", "type": "uint256"}],
         "type": "function"
     }
 ]
@@ -82,7 +113,12 @@ def load_config():
         "sela_price_nis": 4.0,
         "min_nis_to_unlock": 39,
         "community_invite_link": "",
-        "payment_accounts": []
+        "payment_accounts": [
+            {
+                "type": "בנק פועלים",
+                "details": "סניף 153, חשבון 73462, שם: קאופמן צביקה"
+            }
+        ]
     }
     save_config(default_config)
     return default_config
@@ -118,6 +154,19 @@ def save_unlocked(data):
         logger.error(f"Error saving unlocked: {e}")
         return False
 
+def get_token_contract():
+    """קבלת חוזה הטוקן"""
+    if not w3 or not SELA_TOKEN_ADDRESS:
+        return None
+    try:
+        return w3.eth.contract(
+            address=Web3.to_checksum_address(SELA_TOKEN_ADDRESS),
+            abi=ERC20_ABI
+        )
+    except Exception as e:
+        logger.error(f"Error creating token contract: {e}")
+        return None
+
 # Dependency for admin authentication
 def verify_admin_token(x_admin_token: str = Header(...)):
     if x_admin_token != os.getenv("ADMIN_TOKEN"):
@@ -127,7 +176,13 @@ def verify_admin_token(x_admin_token: str = Header(...)):
 # endpoints
 @app.get("/healthz")
 async def health_check():
-    return {"status": "healthy", "service": "SLH API"}
+    web3_status = "connected" if w3 and w3.is_connected() else "disconnected"
+    return {
+        "status": "healthy", 
+        "service": "SLH API",
+        "web3": web3_status,
+        "chain_id": w3.eth.chain_id if w3 else None
+    }
 
 @app.get("/config")
 async def get_config():
@@ -172,6 +227,9 @@ async def set_price(price_data: dict, is_admin: bool = Depends(verify_admin_toke
 @app.get("/token/balance/{address}")
 async def get_token_balance(address: str):
     try:
+        if not w3:
+            return {"error": "Web3 not connected", "balance": 0}
+        
         # וידוא כתובת תקינה
         if not Web3.is_address(address):
             return {"error": "Invalid address", "balance": 0}
@@ -179,10 +237,9 @@ async def get_token_balance(address: str):
         checksum_address = Web3.to_checksum_address(address)
         
         # חוזה טוקן
-        token_contract = w3.eth.contract(
-            address=Web3.to_checksum_address(SELA_TOKEN_ADDRESS),
-            abi=ERC20_ABI
-        )
+        token_contract = get_token_contract()
+        if not token_contract:
+            return {"error": "Token contract not available", "balance": 0}
         
         # קבלת יתרה
         balance = token_contract.functions.balanceOf(checksum_address).call()
@@ -191,16 +248,49 @@ async def get_token_balance(address: str):
         # המרה לערך אנושי
         human_balance = balance / (10 ** decimals)
         
+        # קבלת מידע נוסף על הטוקן
+        symbol = token_contract.functions.symbol().call()
+        name = token_contract.functions.name().call()
+        
         return {
             "address": checksum_address,
             "balance": human_balance,
             "raw_balance": balance,
-            "decimals": decimals
+            "decimals": decimals,
+            "symbol": symbol,
+            "name": name,
+            "token_address": SELA_TOKEN_ADDRESS
         }
         
     except Exception as e:
         logger.error(f"Error getting balance for {address}: {e}")
         return {"error": str(e), "balance": 0}
+
+@app.get("/token/info")
+async def get_token_info():
+    """קבלת מידע על הטוקן"""
+    try:
+        token_contract = get_token_contract()
+        if not token_contract:
+            return {"error": "Token contract not available"}
+        
+        symbol = token_contract.functions.symbol().call()
+        name = token_contract.functions.name().call()
+        decimals = token_contract.functions.decimals().call()
+        total_supply = token_contract.functions.totalSupply().call()
+        
+        return {
+            "symbol": symbol,
+            "name": name,
+            "decimals": decimals,
+            "total_supply": total_supply,
+            "total_supply_human": total_supply / (10 ** decimals),
+            "address": SELA_TOKEN_ADDRESS
+        }
+        
+    except Exception as e:
+        logger.error(f"Error getting token info: {e}")
+        return {"error": str(e)}
 
 @app.get("/unlock/status/{chat_id}")
 async def get_unlock_status(chat_id: int):
@@ -278,6 +368,11 @@ async def revoke_unlock(chat_id: int, is_admin: bool = Depends(verify_admin_toke
         return {"status": "revoked", "chat_id": chat_id}
     else:
         raise HTTPException(status_code=500, detail="Failed to revoke unlock")
+
+@app.get("/unlock/pending")
+async def get_pending_requests(is_admin: bool = Depends(verify_admin_token)):
+    unlocked_data = load_unlocked()
+    return {"pending": unlocked_data["pending"]}
 
 if __name__ == "__main__":
     import uvicorn
