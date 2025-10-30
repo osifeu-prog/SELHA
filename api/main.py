@@ -19,16 +19,40 @@ BSC_RPC_URL = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
 SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS", "0xACb0A09414CEA1C879c67bB7A877E4e19480f022")
 MIN_NIS_TO_UNLOCK = int(os.getenv("MIN_NIS_TO_UNLOCK", "39"))
 
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("SLH_API")
+
+# FastAPI app
+app = FastAPI(title="SLH API", description="SELA Community Trading API")
+
+# Debug - log startup
+logger.info("🚀 SLH API Starting Up...")
+logger.info(f"📁 Current Directory: {os.getcwd()}")
+logger.info(f"📁 Files in current dir: {os.listdir('.')}")
+
+# CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 # Initialize Web3
 try:
     w3 = Web3(Web3.HTTPProvider(BSC_RPC_URL))
     if w3.is_connected():
-        logging.info(f"✅ Connected to BSC. Chain ID: {w3.eth.chain_id}")
+        logger.info(f"✅ Connected to BSC. Chain ID: {w3.eth.chain_id}")
     else:
-        logging.error("❌ Failed to connect to BSC")
+        logger.error("❌ Failed to connect to BSC")
         w3 = None
 except Exception as e:
-    logging.error(f"❌ Web3 connection error: {e}")
+    logger.error(f"❌ Web3 connection error: {e}")
     w3 = None
 
 # ABI for ERC20 token
@@ -60,13 +84,6 @@ ERC20_ABI = [
         "name": "name",
         "outputs": [{"name": "", "type": "string"}],
         "type": "function"
-    },
-    {
-        "constant": True,
-        "inputs": [],
-        "name": "totalSupply",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "type": "function"
     }
 ]
 
@@ -77,8 +94,9 @@ if w3 and SELA_TOKEN_ADDRESS:
             address=Web3.to_checksum_address(SELA_TOKEN_ADDRESS),
             abi=ERC20_ABI
         )
+        logger.info("✅ Token contract initialized")
     except Exception as e:
-        logging.error(f"❌ Error initializing token contract: {e}")
+        logger.error(f"❌ Error initializing token contract: {e}")
         token_contract = None
 else:
     token_contract = None
@@ -106,25 +124,6 @@ DEFAULT_CONFIG = {
     ],
     "telegram_group": None
 }
-
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger("SLH_API")
-
-# FastAPI app - זה מה שהיה חסר!
-app = FastAPI(title="SLH API", description="SELA Community Trading API")
-
-# CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 # Pydantic models
 class ConfigUpdate(BaseModel):
@@ -194,9 +193,12 @@ config_data = load_json(CONFIG_FILE, DEFAULT_CONFIG)
 unlocked_users = load_json(UNLOCKED_FILE, {})
 pending_requests = load_json(PENDING_FILE, {})
 
+logger.info("✅ Data loaded successfully")
+
 # Routes
 @app.get("/")
 async def root():
+    logger.info("GET / called")
     return {
         "message": "SLH API - SELA Community Trading System", 
         "status": "operational",
@@ -205,6 +207,7 @@ async def root():
 
 @app.get("/healthz")
 async def health_check():
+    logger.info("GET /healthz called")
     web3_status = w3 and w3.is_connected()
     return {
         "status": "healthy" if web3_status else "degraded",
@@ -322,14 +325,11 @@ async def get_token_info():
         symbol = token_contract.functions.symbol().call()
         name = token_contract.functions.name().call()
         decimals = token_contract.functions.decimals().call()
-        total_supply = token_contract.functions.totalSupply().call()
         
         return {
             "symbol": symbol,
             "name": name,
             "decimals": decimals,
-            "total_supply": total_supply,
-            "total_supply_human": total_supply / (10 ** decimals),
             "address": SELA_TOKEN_ADDRESS,
             "chain_id": w3.eth.chain_id if w3 else None
         }
@@ -340,6 +340,8 @@ async def get_token_info():
 @app.get("/unlock/status/{chat_id}")
 async def get_unlock_status(chat_id: str):
     """קבלת סטטוס Unlock"""
+    logger.info(f"GET /unlock/status/{chat_id} called")
+    
     is_unlocked = chat_id in unlocked_users
     user_data = unlocked_users.get(chat_id, {})
     
@@ -353,6 +355,8 @@ async def get_unlock_status(chat_id: str):
 @app.post("/unlock/verify")
 async def verify_unlock(request: UnlockVerify):
     """רישום בקשת אימות"""
+    logger.info(f"POST /unlock/verify for chat_id: {request.chat_id}")
+    
     pending_requests[request.chat_id] = {
         "reference": request.reference,
         "wallet_address": request.wallet_address,
@@ -377,6 +381,7 @@ async def grant_unlock(
     verify_admin_token(x_admin_token)
     
     chat_id = request.chat_id
+    logger.info(f"POST /unlock/grant for chat_id: {chat_id}")
     
     # קבלת נתונים מהבקשה הממתינה
     pending_data = pending_requests.get(chat_id, {})
@@ -401,27 +406,9 @@ async def grant_unlock(
 async def get_pending_requests(x_admin_token: str = Header(None)):
     """קבלת רשימת בקשות ממתינות"""
     verify_admin_token(x_admin_token)
+    logger.info("GET /unlock/pending called")
     return pending_requests
 
-@app.post("/unlock/revoke")
-async def revoke_unlock(
-    chat_id: str,
-    x_admin_token: str = Header(None)
-):
-    """ביטול Unlock"""
-    verify_admin_token(x_admin_token)
-    
-    if chat_id in unlocked_users:
-        del unlocked_users[chat_id]
-    
-    if save_json(UNLOCKED_FILE, unlocked_users):
-        logger.info(f"Unlock revoked for chat_id: {chat_id}")
-        return {"status": "revoked", "chat_id": chat_id}
-    else:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to revoke unlock"
-        )
+logger.info("✅ All routes registered successfully")
 
-# חשוב: אין יותר קריאה ל-uvicorn.run כאן למטה
-# Railway ידאג להרצה אוטומטית
+# No uvicorn.run here - Railway handles this
