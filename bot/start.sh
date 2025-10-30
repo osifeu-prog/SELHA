@@ -1,3 +1,2 @@
-#!/usr/bin/env bash
-set -euo pipefail
-exec python -u bot/bot.py
+#!/bin/bash
+python -u bot.py
