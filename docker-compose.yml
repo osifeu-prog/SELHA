@@ -1,19 +1,29 @@
-version: "3.9"
-services:
-  slh_api:
-    build: ./api
-    environment:
-      - BSC_RPC_URL=${BSC_RPC_URL}
-      - CHAIN_ID=${CHAIN_ID}
-      - SELA_TOKEN_ADDRESS=${SELA_TOKEN_ADDRESS}
-      - TREASURY_ADDRESS=${TREASURY_ADDRESS}
-      - TREASURY_PRIVATE_KEY=${TREASURY_PRIVATE_KEY}
-    ports: ["8081:8080"]
+version: '3.8'
 
-  slh_bot:
+services:
+  slh-api:
+    build: ./api
+    ports:
+      - "8080:8080"
+    environment:
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - BSC_RPC_URL=${BSC_RPC_URL}
+      - SELA_TOKEN_ADDRESS=${SELA_TOKEN_ADDRESS}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - MIN_NIS_TO_UNLOCK=${MIN_NIS_TO_UNLOCK:-39}
+      - GROUP_INVITE_LINK=${GROUP_INVITE_LINK}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+
+  slh-bot:
     build: ./bot
     environment:
       - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - WEBHOOK_URL=http://host.docker.internal:8082/tg
-      - LOG_LEVEL=DEBUG
-    ports: ["8082:8080"]
+      - SLH_API_BASE=${SLH_API_BASE}
+      - PUBLIC_BOT_BASE=${PUBLIC_BOT_BASE}
+      - ADMIN_TOKEN=${ADMIN_TOKEN}
+      - ADMIN_CHAT_ID=${ADMIN_CHAT_ID}
+    depends_on:
+      - slh-api
+    restart: unless-stopped
