@@ -2,11 +2,23 @@ import os
 import logging
 import asyncio
 import httpx
-from telegram import Update
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram import (
+    Update, 
+    ReplyKeyboardMarkup, 
+    KeyboardButton,
+    ReplyKeyboardRemove
+)
+from telegram.ext import (
+    Application, 
+    CommandHandler, 
+    ContextTypes, 
+    MessageHandler, 
+    filters
+)
 from telegram.constants import ParseMode
 from fastapi import FastAPI, Request
 import uvicorn
+import time
 
 # הגדרת לוגר
 logging.basicConfig(
@@ -67,74 +79,96 @@ class SLHBot:
         self.is_configured = all([TELEGRAM_BOT_TOKEN, SLH_API_BASE, PUBLIC_BOT_BASE])
         self.initialized = False
 
+    def get_main_keyboard(self):
+        """יצירת Keyboard ראשי"""
+        return ReplyKeyboardMarkup([
+            [KeyboardButton("💎 מחיר"), KeyboardButton("👛 ארנק")],
+            [KeyboardButton("🔓 הצטרפות"), KeyboardButton("📊 סטטוס")],
+            [KeyboardButton("❓ תמיכה"), KeyboardButton("🎯 הדרכה")]
+        ], resize_keyboard=True)
+
+    def get_admin_keyboard(self):
+        """יצירת Keyboard למנהלים"""
+        return ReplyKeyboardMarkup([
+            [KeyboardButton("📊 סטטוס"), KeyboardButton("⏳ ממתינים")],
+            [KeyboardButton("💎 מחיר"), KeyboardButton("⚙️ קונפיג")],
+            [KeyboardButton("🏠 תפריט ראשי")]
+        ], resize_keyboard=True)
+
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """פקודת /start"""
+        """פקודת /start משודרגת"""
         if not self.initialized:
             await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
             return
             
         user = update.effective_user
-        chat_id = update.effective_chat.id
         
         try:
             # קבלת מחיר עדכני מה-API
             price_response = await client.get(f"{SLH_API_BASE}/config/price")
             price_data = price_response.json()
-            sela_price = price_data.get("sela_price_nis", 4.0)
+            sela_price = price_data.get("price_nis", 444.0)  # שינוי מ� sela_price_nis ל-price_nis
             
             welcome_text = f"""
-👋 שלום {user.first_name}!
+🎉 **ברוך הבא לקהילת SELA!** 🎉
 
-ברוך הבא לקהילת SELA - המערכת הקהילתית למסחר SELA!
+🤝 **קהילת העסקים והמסחר המתקדמת בישראל**
 
 💎 **מחיר SELA נוכחי:** {sela_price} ₪
 
-🤖 **מה אני יכול לעשות:**
-• `/price` - הצגת מחיר SELA עדכני
-• `/wallet <address>` - הצגת יתרת SELA בארנק שלך
-• `/unlock39` - הצטרפות לקהילה (39₪)
-• `/status` - סטטוס הנוכחי
+**🚀 ההטבות שמחכות לך לאחר ההצטרפות:**
 
-🔗 **לאחר Unlock** תקבל גישה ל:
-• קישור לקבוצת הקהילה
-• אפשרויות שליחה וקבלה של SELA
-• פלטפורמת מסחר למכירת SELA
-• עדכונים שוטפים
+✅ **גישה לקהילת עסקים אקסקלוסיבית**
+✅ **פלטפורמת מסחר למכירת SELA במחיר אישי**
+✅ **ניהול תיק השקעות מתקדם**
+✅ **עדכונים שוטפים והזדמנויות עסקיות**
+✅ **תמיכה טכנית מלאה**
 
-הקלד /help לקבלת רשימת פקודות מלאה.
+**📱 בחר פעולה מהתפריט:**
             """
             
-            await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                welcome_text, 
+                reply_markup=self.get_main_keyboard(),
+                parse_mode=ParseMode.MARKDOWN
+            )
             logger.info(f"✅ Sent welcome message to user {user.id}")
             
         except Exception as e:
             logger.error(f"Error in start command: {e}")
-            await update.message.reply_text("⚠️ שגיאה בהתחברות למערכת. נסה שוב מאוחר יותר.")
+            await update.message.reply_text(
+                "⚠️ שגיאה בהתחברות למערכת. נסה שוב מאוחר יותר.",
+                reply_markup=self.get_main_keyboard()
+            )
 
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """פקודת /help"""
+        """פקודת /help משודרגת"""
         help_text = """
-📋 **רשימת פקודות:**
+🎯 **הדרכה לשימוש בבוט**
 
-**לכל המשתמשים:**
-• `/start` - התחל עבודה עם הבוט
-• `/price` - הצג מחיר SELA נוכחי
-• `/wallet <address>` - הצג יתרת SELA בארנק
-• `/unlock39` - הוראות הצטרפות לקהילה
-• `/status` - בדיקת סטטוס
+**פקודות עיקריות:**
+• `💎 מחיר` - הצג מחיר SELA נוכחי
+• `👛 ארנק` - הצג יתרת SELA בארנק
+• `🔓 הצטרפות` - הוראות הצטרפות לקהילה
+• `📊 סטטוס` - בדיקת סטטוס המערכת
 
-**למשתמשים מאושרים:**
+**לאחר Unlock:**
 • `/join` - קבל קישור לקבוצת הקהילה
+• `/send` - שליחת SELA לאחרים
+• `/receive` - קבלת SELA
 
-**למנהלים:**
-• `/approve <chat_id>` - אשר משתמש
-• `/set_price <price>` - שנה מחיר SELA
-
-📝 **דוגמאות:**
+**דוגמאות:**
 `/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`
-`/unlock39`
+`/unlock_verify TX123456789`
+
+**תמיכה:**
+לחץ '❓ תמיכה' לעזרה נוספת
         """
-        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
+        await update.message.reply_text(
+            help_text, 
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=self.get_main_keyboard()
+        )
 
     async def price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת /price"""
@@ -145,7 +179,7 @@ class SLHBot:
         try:
             response = await client.get(f"{SLH_API_BASE}/config/price")
             price_data = response.json()
-            sela_price = price_data.get("sela_price_nis", 4.0)
+            sela_price = price_data.get("price_nis", 444.0)  # שינוי מ� sela_price_nis ל-price_nis
             
             price_text = f"""
 💎 **מחיר SELA נוכחי:**
@@ -155,11 +189,18 @@ class SLHBot:
 המחיר מתעדכן באופן שוטף לפי תנאי השוק.
             """
             
-            await update.message.reply_text(price_text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                price_text, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
             
         except Exception as e:
             logger.error(f"Error getting price: {e}")
-            await update.message.reply_text("⚠️ לא ניתן לקבל מחיר עדכני כרגע. נסה שוב מאוחר יותר.")
+            await update.message.reply_text(
+                "⚠️ לא ניתן לקבל מחיר עדכני כרגע. נסה שוב מאוחר יותר.",
+                reply_markup=self.get_main_keyboard()
+            )
 
     async def wallet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת /wallet"""
@@ -168,7 +209,11 @@ class SLHBot:
             return
             
         if not context.args:
-            await update.message.reply_text("❌ אנא ספק כתובת ארנק. דוגמה:\n`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                "👛 **רישום ארנק**\n\nשלח את כתובת ה-MetaMask או Trust Wallet שלך בפורמט:\n\n`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`\n\nאו לחץ על '👛 ארנק' והזן את הכתובת.",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
             return
         
         wallet_address = context.args[0]
@@ -178,16 +223,19 @@ class SLHBot:
             balance_data = response.json()
             
             if "error" in balance_data:
-                await update.message.reply_text(f"❌ שגיאה: {balance_data['error']}")
+                await update.message.reply_text(
+                    f"❌ שגיאה: {balance_data['error']}",
+                    reply_markup=self.get_main_keyboard()
+                )
                 return
             
-            balance = balance_data.get("balance", 0)
-            symbol = balance_data.get("symbol", "SELA")
+            balance = balance_data.get("balance_sela", 0)  # שינוי מ-balance ל-balance_sela
+            symbol = "SELA"
             
             # קבלת מחיר נוכחי
             price_response = await client.get(f"{SLH_API_BASE}/config/price")
             price_data = price_response.json()
-            sela_price = price_data.get("sela_price_nis", 4.0)
+            sela_price = price_data.get("price_nis", 444.0)
             
             # חישוב ערך בשקלים
             value_nis = balance * sela_price
@@ -202,14 +250,21 @@ class SLHBot:
 💡 *מחיר {symbol}: {sela_price} ₪*
             """
             
-            await update.message.reply_text(balance_text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                balance_text, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
             
         except Exception as e:
             logger.error(f"Error getting wallet balance: {e}")
-            await update.message.reply_text("⚠️ שגיאה בקבלת יתרת הארנק. ודא שהכתובת תקינה ונסה שוב.")
+            await update.message.reply_text(
+                "⚠️ שגיאה בקבלת יתרת הארנק. ודא שהכתובת תקינה ונסה שוב.",
+                reply_markup=self.get_main_keyboard()
+            )
 
     async def unlock39_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """פקודת /unlock39"""
+        """פקודת /unlock39 משודרגת"""
         if not self.initialized:
             await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
             return
@@ -222,65 +277,157 @@ class SLHBot:
             config = config_response.json()
             
             min_nis = config.get("min_nis_to_unlock", 39)
-            payment_accounts = config.get("payment_accounts", [])
+            bank_accounts = config.get("bank_accounts", [])
             
             # בדיקת סטטוס Unlock
             status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
             status = status_response.json()
             
-            if status.get("approved"):
+            if status.get("unlocked"):
                 # כבר מאושר - שליחת קישור קבוצה
-                invite_link = config.get("community_invite_link", "")
-                if invite_link:
+                telegram_group = config.get("telegram_group", "")
+                if telegram_group:
                     await update.message.reply_text(
-                        f"✅ אתה כבר מאושר! הצטרף לקבוצה כאן: {invite_link}",
-                        parse_mode=ParseMode.MARKDOWN
+                        f"✅ אתה כבר מאושר! הצטרף לקבוצה כאן: {telegram_group}",
+                        parse_mode=ParseMode.MARKDOWN,
+                        reply_markup=self.get_main_keyboard()
                     )
                 else:
-                    await update.message.reply_text("✅ אתה כבר מאושר! קישור הקבוצה יישלח בהמשך.")
+                    await update.message.reply_text(
+                        "✅ אתה כבר מאושר! קישור הקבוצה יישלח בהמשך.",
+                        reply_markup=self.get_main_keyboard()
+                    )
                 return
             
-            if status.get("pending"):
-                await update.message.reply_text("⏳ הבקשה שלך ממתינה לאישור. נא להמתין לאישור מנהל.")
-                return
-            
-            # הוראות תשלום
+            # הוראות תשלום משודרגות
             payment_text = f"""
-🔓 **הצטרפות לקהילת SELA**
+🔓 **הצטרפות לקהילת SELA - צעד אחר צעד** 🔓
 
-💰 **עלות:** {min_nis} ₪
+**💰 השקעה:** {min_nis} ₪ בלבד
 
-**הוראות תשלום:**
+**📋 שלבי ההצטרפות:**
 
-1. העבר {min_nis} ₪ לאחד החשבונות הבאים:
+1️⃣ **העברת תשלום**
+   העבר {min_nis} ₪ לחשבון:
 """
             
-            if payment_accounts:
-                for i, account in enumerate(payment_accounts, 1):
-                    acc_type = account.get("type", "חשבון")
-                    details = account.get("details", "")
-                    payment_text += f"\n{i}. **{acc_type}:** {details}"
+            if bank_accounts:
+                for account in bank_accounts:
+                    bank = account.get("bank", "פועלים")
+                    branch = account.get("branch", "153")
+                    account_num = account.get("account", "73462")
+                    name = account.get("name", "קאופמן צביקה")
+                    
+                    payment_text += f"""
+   🏦 **בנק:** {bank}
+   🏢 **סניף:** {branch}
+   📊 **חשבון:** {account_num}
+   👤 **שם:** {name}
+"""
             else:
-                payment_text += "\n**בנק: פועלים**\n**סניף: 153**\n**חשבון: 73462**\n**שם: קאופמן צביקה**"
+                payment_text += """
+   🏦 **בנק:** פועלים
+   🏢 **סניף:** 153
+   📊 **חשבון:** 73462
+   👤 **שם:** קאופמן צביקה
+"""
             
             payment_text += f"""
 
-2. לאחר התשלום, שלח לנו את פרטי הארנק שלך עם הפקודה:
-`/wallet <your_wallet_address>`
+2️⃣ **רישום הארנק שלך**
+   שלח את כתובת ה-MetaMask/Trust Wallet שלך:
+   👉 `/wallet <your_wallet_address>`
 
-3. שלח את מספר העסקה או קבלה עם:
-`/unlock_verify <transaction_reference>`
+3️⃣ **אישור התשלום**
+   שלח תמונה של אישור ההעברה או מספר עסקה:
+   👉 `/unlock_verify <transaction_reference>`
 
-📞 **לשאלות:** פנה למנהל המערכת.
+**🎁 מה תקבל לאחר האישור:**
+✨ קישור לקבוצת הטלגרם האקסקלוסיבית
+✨ גישה לפלטפורמת המסחר המלאה
+✨ אפשרות למכור SELA במחיר אישי
+✨ קהילת עסקים תומכת ופעילה
 
-💡 *לאחר אישור התשלום תקבל גישה מלאה לקהילה!*
-            """
+**❓ נתקלת בבעיה?**
+לחץ '❓ תמיכה' לקבלת עזרה מיידית!
+"""
             
-            await update.message.reply_text(payment_text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                payment_text, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
             
         except Exception as e:
             logger.error(f"Error in unlock39 command: {e}")
-            await update.message.reply_text("⚠️ שגיאה בהצגת הוראות התשלום. נסה שוב מאוחר יותר.")
+            await update.message.reply_text(
+                "⚠️ שגיאה בהצגת הוראות התשלום. נסה שוב מאוחר יותר.",
+                reply_markup=self.get_main_keyboard()
+            )
+
+    async def handle_message(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """טיפול בהודעות טקסט מהכפתורים"""
+        if not self.initialized:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        text = update.message.text
+        
+        if text == "💎 מחיר":
+            await self.price_command(update, context)
+        elif text == "👛 ארנק":
+            await update.message.reply_text(
+                "👛 **רישום ארנק**\n\nשלח את כתובת ה-MetaMask או Trust Wallet שלך בפורמט:\n\n`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
+        elif text == "🔓 הצטרפות":
+            await self.unlock39_command(update, context)
+        elif text == "📊 סטטוס":
+            await self.status_command(update, context)
+        elif text == "❓ תמיכה":
+            await self.support_command(update, context)
+        elif text == "🎯 הדרכה":
+            await self.help_command(update, context)
+        elif text == "🏠 תפריט ראשי":
+            await update.message.reply_text(
+                "🏠 **תפריט ראשי**",
+                reply_markup=self.get_main_keyboard()
+            )
+        else:
+            await update.message.reply_text(
+                "🤔 לא מזהה את הפקודה. השתמש בתפריט או הקלד /help לעזרה.",
+                reply_markup=self.get_main_keyboard()
+            )
+
+    async def support_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת תמיכה"""
+        support_text = """
+❓ **תמיכה ועזרה**
+
+**לשאלות והבהרות:**
+
+📞 **מנהל המערכת:** @OsifUngar
+
+**בעיות טכניות:**
+• בעיית חיבור לבוט
+• שגיאה בהצגת יתרה
+• בעיית אישור תשלום
+
+**נושאים כלליים:**
+• הסבר על הקהילה
+• הדרכה טכנית
+• הצעות לשיפור
+
+**שעות פעילות:** 24/7
+
+נשמח לעזור בכל שאלה! 😊
+"""
+        await update.message.reply_text(
+            support_text, 
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=self.get_main_keyboard()
+        )
 
     async def unlock_verify_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת /unlock_verify"""
@@ -289,7 +436,10 @@ class SLHBot:
             return
             
         if not context.args:
-            await update.message.reply_text("❌ אנא ספק מזהה תשלום. דוגמה:\n`/unlock_verify TX123456789`")
+            await update.message.reply_text(
+                "❌ אנא ספק מזהה תשלום. דוגמה:\n`/unlock_verify TX123456789`",
+                parse_mode=ParseMode.MARKDOWN
+            )
             return
         
         payment_ref = context.args[0]
@@ -298,9 +448,9 @@ class SLHBot:
         try:
             # שליחת בקשת אימות ל-API
             verify_data = {
-                "chat_id": chat_id,
-                "wallet_address": "to_be_provided",
-                "payment_ref": payment_ref
+                "chat_id": str(chat_id),
+                "reference": payment_ref,
+                "wallet_address": "to_be_provided"  # המשתמש צריך לשלוח את הארנק בנפרד
             }
             
             response = await client.post(
@@ -311,8 +461,11 @@ class SLHBot:
             
             result = response.json()
             
-            if result.get("status") == "pending_approval":
-                await update.message.reply_text("✅ בקשתך התקבלה וממתינה לאישור. תתעדכן כאשר תאושר.")
+            if result.get("status") == "pending":
+                await update.message.reply_text(
+                    "✅ בקשתך התקבלה וממתינה לאישור. תתעדכן כאשר תאושר.",
+                    reply_markup=self.get_main_keyboard()
+                )
                 
                 # הודעה למנהל
                 if ADMIN_CHAT_ID:
@@ -320,15 +473,22 @@ class SLHBot:
                     await context.bot.send_message(ADMIN_CHAT_ID, admin_msg)
                     
             elif result.get("status") == "already_approved":
-                await update.message.reply_text("✅ אתה כבר מאושר! השתמש ב-/join כדי לקבל קישור קבוצה.")
-            elif result.get("status") == "already_pending":
-                await update.message.reply_text("⏳ כבר יש לך בקשה ממתינה לאישור.")
+                await update.message.reply_text(
+                    "✅ אתה כבר מאושר! השתמש ב-/join כדי לקבל קישור קבוצה.",
+                    reply_markup=self.get_main_keyboard()
+                )
             else:
-                await update.message.reply_text("⚠️ שגיאה ברישום הבקשה. נסה שוב.")
+                await update.message.reply_text(
+                    "⚠️ שגיאה ברישום הבקשה. נסה שוב.",
+                    reply_markup=self.get_main_keyboard()
+                )
                 
         except Exception as e:
             logger.error(f"Error in unlock_verify: {e}")
-            await update.message.reply_text("⚠️ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.")
+            await update.message.reply_text(
+                "⚠️ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.",
+                reply_markup=self.get_main_keyboard()
+            )
 
     async def join_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת /join"""
@@ -343,27 +503,37 @@ class SLHBot:
             status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
             status = status_response.json()
             
-            if not status.get("approved"):
-                await update.message.reply_text("❌ אתה עדיין לא מאושר. השתמש ב-/unlock39 כדי להצטרף.")
+            if not status.get("unlocked"):
+                await update.message.reply_text(
+                    "❌ אתה עדיין לא מאושר. השתמש ב-/unlock39 כדי להצטרף.",
+                    reply_markup=self.get_main_keyboard()
+                )
                 return
             
             # קבלת קישור קבוצה
             config_response = await client.get(f"{SLH_API_BASE}/config")
             config = config_response.json()
             
-            invite_link = config.get("community_invite_link", "")
+            telegram_group = config.get("telegram_group", "")
             
-            if invite_link:
+            if telegram_group:
                 await update.message.reply_text(
-                    f"🎉 ברוך הבא לקהילה! הצטרף כאן: {invite_link}",
-                    parse_mode=ParseMode.MARKDOWN
+                    f"🎉 ברוך הבא לקהילה! הצטרף כאן: {telegram_group}",
+                    parse_mode=ParseMode.MARKDOWN,
+                    reply_markup=self.get_main_keyboard()
                 )
             else:
-                await update.message.reply_text("✅ אתה מאושר! קישור הקבוצה יישלח בהמשך.")
+                await update.message.reply_text(
+                    "✅ אתה מאושר! קישור הקבוצה יישלח בהמשך.",
+                    reply_markup=self.get_main_keyboard()
+                )
                 
         except Exception as e:
             logger.error(f"Error in join command: {e}")
-            await update.message.reply_text("⚠️ שגיאה בקבלת קישור הקבוצה. נסה שוב מאוחר יותר.")
+            await update.message.reply_text(
+                "⚠️ שגיאה בקבלת קישור הקבוצה. נסה שוב מאוחר יותר.",
+                reply_markup=self.get_main_keyboard()
+            )
 
     async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת /status"""
@@ -382,7 +552,7 @@ class SLHBot:
             status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
             status = status_response.json()
             
-            unlock_status = "🟢 מאושר" if status.get("approved") else "🟡 ממתין" if status.get("pending") else "🔴 לא מאושר"
+            unlock_status = "🟢 מאושר" if status.get("unlocked") else "🟡 ממתין" if status.get("pending") else "🔴 לא מאושר"
             
             status_text = f"""
 📊 **סטטוס מערכת**
@@ -396,11 +566,18 @@ class SLHBot:
 • **API Base:** {SLH_API_BASE}
             """
             
-            await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                status_text, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
             
         except Exception as e:
             logger.error(f"Error in status command: {e}")
-            await update.message.reply_text("⚠️ שגיאה בבדיקת סטטוס. ה-API כנראה לא זמין.")
+            await update.message.reply_text(
+                "⚠️ שגיאה בבדיקת סטטוס. ה-API כנראה לא זמין.",
+                reply_markup=self.get_main_keyboard()
+            )
 
     async def approve_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת /approve למנהלים"""
@@ -413,7 +590,10 @@ class SLHBot:
             return
         
         if not context.args:
-            await update.message.reply_text("❌ אנא ספק מזהה צ'אט. דוגמה: `/approve 123456789`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                "❌ אנא ספק מזהה צ'אט. דוגמה: `/approve 123456789`", 
+                parse_mode=ParseMode.MARKDOWN
+            )
             return
         
         try:
@@ -421,13 +601,13 @@ class SLHBot:
             
             response = await client.post(
                 f"{SLH_API_BASE}/unlock/grant",
-                params={"chat_id": chat_id},
+                json={"chat_id": str(chat_id)},
                 headers=headers
             )
             
             result = response.json()
             
-            if result.get("status") == "approved":
+            if result.get("status") == "granted":
                 await update.message.reply_text(f"✅ משתמש {chat_id} אושר בהצלחה!")
                 
                 # הודעה למשתמש
@@ -458,7 +638,10 @@ class SLHBot:
             return
         
         if not context.args:
-            await update.message.reply_text("❌ אנא ספק מחיר. דוגמה: `/set_price 4.5`", parse_mode=ParseMode.MARKDOWN)
+            await update.message.reply_text(
+                "❌ אנא ספק מחיר. דוגמה: `/set_price 444`", 
+                parse_mode=ParseMode.MARKDOWN
+            )
             return
         
         try:
@@ -466,13 +649,13 @@ class SLHBot:
             
             response = await client.post(
                 f"{SLH_API_BASE}/config/price",
-                json={"sela_price_nis": new_price},
+                json={"price_nis": new_price},
                 headers=headers
             )
             
             result = response.json()
             
-            if result.get("status") == "price_updated":
+            if result.get("status") == "updated":
                 await update.message.reply_text(f"✅ מחיר SELA עודכן ל-{new_price} ₪")
             else:
                 await update.message.reply_text("❌ שגיאה בעדכון המחיר.")
@@ -488,7 +671,8 @@ class SLHBot:
         try:
             if update and update.effective_chat:
                 await update.effective_chat.send_message(
-                    "❌ אירעה שגיאה בבוט. אנא נסה שוב מאוחר יותר."
+                    "❌ אירעה שגיאה בבוט. אנא נסה שוב מאוחר יותר.",
+                    reply_markup=self.get_main_keyboard()
                 )
         except Exception as e:
             logger.error(f"Error in error handler: {e}")
@@ -504,6 +688,10 @@ class SLHBot:
         self.application.add_handler(CommandHandler("unlock_verify", self.unlock_verify_command))
         self.application.add_handler(CommandHandler("join", self.join_command))
         self.application.add_handler(CommandHandler("status", self.status_command))
+        self.application.add_handler(CommandHandler("support", self.support_command))
+        
+        # handler להודעות טקסט (כפתורים)
+        self.application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.handle_message))
         
         # handlers מנהלים
         self.application.add_handler(CommandHandler("approve", self.approve_command))
