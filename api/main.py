@@ -13,7 +13,7 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configuration - חשוב: Railway מספק PORT אוטומטית
+# Configuration - BSC Mainnet
 PORT = int(os.getenv("PORT", 8080))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 BSC_RPC_URL = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
@@ -33,8 +33,9 @@ app = FastAPI(title="SLH API", description="SELA Community Trading API")
 # Debug - log startup
 logger.info("🚀 SLH API Starting Up...")
 logger.info(f"📁 Current Directory: {os.getcwd()}")
-logger.info(f"📁 Files in current dir: {os.listdir('.')}")
 logger.info(f"🔌 Using PORT: {PORT}")
+logger.info(f"🔗 BSC RPC: {BSC_RPC_URL}")
+logger.info(f"🏷️ Token Address: {SELA_TOKEN_ADDRESS}")
 
 # CORS
 app.add_middleware(
@@ -49,7 +50,7 @@ app.add_middleware(
 try:
     w3 = Web3(Web3.HTTPProvider(BSC_RPC_URL))
     if w3.is_connected():
-        logger.info(f"✅ Connected to BSC. Chain ID: {w3.eth.chain_id}")
+        logger.info(f"✅ Connected to BSC Mainnet. Chain ID: {w3.eth.chain_id}")
     else:
         logger.error("❌ Failed to connect to BSC")
         w3 = None
@@ -57,51 +58,60 @@ except Exception as e:
     logger.error(f"❌ Web3 connection error: {e}")
     w3 = None
 
-# ABI for ERC20 token
+# ABI מלא ומתוקן לטוקן ERC-20
 ERC20_ABI = [
     {
-        "constant": True,
-        "inputs": [{"name": "_owner", "type": "address"}],
+        "inputs": [{"internalType": "address", "name": "account", "type": "address"}],
         "name": "balanceOf",
-        "outputs": [{"name": "balance", "type": "uint256"}],
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
         "type": "function"
     },
     {
-        "constant": True,
         "inputs": [],
         "name": "decimals",
-        "outputs": [{"name": "", "type": "uint8"}],
+        "outputs": [{"internalType": "uint8", "name": "", "type": "uint8"}],
+        "stateMutability": "view",
         "type": "function"
     },
     {
-        "constant": True,
         "inputs": [],
         "name": "symbol",
-        "outputs": [{"name": "", "type": "string"}],
+        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+        "stateMutability": "view",
         "type": "function"
     },
     {
-        "constant": True,
         "inputs": [],
         "name": "name",
-        "outputs": [{"name": "", "type": "string"}],
+        "outputs": [{"internalType": "string", "name": "", "type": "string"}],
+        "stateMutability": "view",
+        "type": "function"
+    },
+    {
+        "inputs": [],
+        "name": "totalSupply",
+        "outputs": [{"internalType": "uint256", "name": "", "type": "uint256"}],
+        "stateMutability": "view",
         "type": "function"
     }
 ]
 
 # Initialize token contract
+token_contract = None
 if w3 and SELA_TOKEN_ADDRESS:
     try:
-        token_contract = w3.eth.contract(
-            address=Web3.to_checksum_address(SELA_TOKEN_ADDRESS),
-            abi=ERC20_ABI
-        )
-        logger.info("✅ Token contract initialized")
+        checksum_address = Web3.to_checksum_address(SELA_TOKEN_ADDRESS)
+        token_contract = w3.eth.contract(address=checksum_address, abi=ERC20_ABI)
+        
+        # Test the contract connection
+        symbol = token_contract.functions.symbol().call()
+        logger.info(f"✅ Token contract initialized. Symbol: {symbol}")
     except Exception as e:
         logger.error(f"❌ Error initializing token contract: {e}")
         token_contract = None
 else:
-    token_contract = None
+    logger.error("❌ Web3 or token address not available")
 
 # Data storage
 DATA_DIR = "data"
@@ -179,16 +189,53 @@ def verify_admin_token(x_admin_token: str = Header(None)):
 def get_token_balance(address: str) -> float:
     """קבלת יתרת טוקנים"""
     if not token_contract:
+        logger.error("Token contract not available")
         return 0.0
     
     try:
         checksum_address = Web3.to_checksum_address(address)
+        
+        # בדיקה אם הכתובת תקינה
+        code = w3.eth.get_code(checksum_address)
+        if code == b'':
+            logger.error(f"Address {checksum_address} is not a contract")
+            return 0.0
+            
         balance = token_contract.functions.balanceOf(checksum_address).call()
         decimals = token_contract.functions.decimals().call()
-        return balance / (10 ** decimals)
+        
+        human_balance = balance / (10 ** decimals)
+        logger.info(f"Balance for {address}: {human_balance} tokens")
+        
+        return human_balance
+        
     except Exception as e:
         logger.error(f"Error getting balance for {address}: {e}")
         return 0.0
+
+def get_token_info_safe():
+    """קבלת מידע על הטוקן עם טיפול בשגיאות"""
+    if not token_contract:
+        return {"error": "Token contract not available"}
+    
+    try:
+        symbol = token_contract.functions.symbol().call()
+        name = token_contract.functions.name().call()
+        decimals = token_contract.functions.decimals().call()
+        total_supply = token_contract.functions.totalSupply().call()
+        
+        return {
+            "symbol": symbol,
+            "name": name,
+            "decimals": decimals,
+            "total_supply": total_supply,
+            "total_supply_human": total_supply / (10 ** decimals),
+            "address": SELA_TOKEN_ADDRESS,
+            "chain_id": w3.eth.chain_id if w3 else None
+        }
+    except Exception as e:
+        logger.error(f"Error getting token info: {e}")
+        return {"error": str(e)}
 
 # Load initial data
 config_data = load_json(CONFIG_FILE, DEFAULT_CONFIG)
@@ -205,19 +252,24 @@ async def root():
         "message": "SLH API - SELA Community Trading System", 
         "status": "operational",
         "version": "1.0.0",
-        "port": PORT
+        "web3_connected": w3 and w3.is_connected(),
+        "token_contract_ready": token_contract is not None
     }
 
 @app.get("/healthz")
 async def health_check():
     logger.info("GET /healthz called")
     web3_status = w3 and w3.is_connected()
+    token_status = token_contract is not None
+    
+    status_level = "healthy" if web3_status and token_status else "degraded"
+    
     return {
-        "status": "healthy" if web3_status else "degraded",
+        "status": status_level,
         "web3_connected": web3_status,
-        "chain_id": w3.eth.chain_id if web3_status else None,
-        "service": "SLH API",
-        "port": PORT
+        "token_contract_ready": token_status,
+        "chain_id": w3.eth.chain_id if w3 else None,
+        "service": "SLH API"
     }
 
 @app.get("/config")
@@ -322,24 +374,8 @@ async def get_balance(address: str):
 @app.get("/token/info")
 async def get_token_info():
     """קבלת מידע על הטוקן"""
-    if not token_contract:
-        return {"error": "Token contract not available"}
-    
-    try:
-        symbol = token_contract.functions.symbol().call()
-        name = token_contract.functions.name().call()
-        decimals = token_contract.functions.decimals().call()
-        
-        return {
-            "symbol": symbol,
-            "name": name,
-            "decimals": decimals,
-            "address": SELA_TOKEN_ADDRESS,
-            "chain_id": w3.eth.chain_id if w3 else None
-        }
-    except Exception as e:
-        logger.error(f"Error getting token info: {e}")
-        return {"error": str(e)}
+    logger.info("GET /token/info called")
+    return get_token_info_safe()
 
 @app.get("/unlock/status/{chat_id}")
 async def get_unlock_status(chat_id: str):
@@ -413,6 +449,26 @@ async def get_pending_requests(x_admin_token: str = Header(None)):
     logger.info("GET /unlock/pending called")
     return pending_requests
 
+@app.get("/debug/token")
+async def debug_token():
+    """Debug endpoint for token contract"""
+    if not token_contract:
+        return {"error": "Token contract not available"}
+    
+    try:
+        # בדיקת קוד החוזה
+        code = w3.eth.get_code(Web3.to_checksum_address(SELA_TOKEN_ADDRESS))
+        has_code = code != b''
+        
+        return {
+            "token_address": SELA_TOKEN_ADDRESS,
+            "has_contract_code": has_code,
+            "code_length": len(code),
+            "token_info": get_token_info_safe()
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
 logger.info("✅ All routes registered successfully")
 
-# חשוב: אין קריאה ל-uvicorn.run - Railway מריץ אוטומטית
+# No uvicorn.run here - Railway handles this
