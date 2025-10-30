@@ -1,312 +1,473 @@
-import os, sys, json, asyncio, logging
-from typing import Optional, Dict, Any
+import os
+import logging
+import asyncio
 import httpx
+from telegram import Update
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.constants import ParseMode
+import json
 
-from pythonjsonlogger import jsonlogger
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
-from telegram.ext import (
-    Application, ApplicationBuilder, CommandHandler,
-    ContextTypes
+# הגדרת לוגר
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
 )
+logger = logging.getLogger(__name__)
 
-# ===== env =====
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
-SLH_API_BASE = os.getenv("SLH_API_BASE", "").strip().rstrip("/")
-PUBLIC_BOT_BASE = os.getenv("PUBLIC_BOT_BASE", "").strip().rstrip("/")
-ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "").strip()
-GROUP_INVITE_LINK = os.getenv("GROUP_INVITE_LINK", "").strip()
-APPROVED_CHAT_ID = int(os.getenv("APPROVED_CHAT_ID", "0") or 0)
+# משתני סביבה
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+SLH_API_BASE = os.getenv("SLH_API_BASE")
+PUBLIC_BOT_BASE = os.getenv("PUBLIC_BOT_BASE")
+ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
+ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
 
-# ===== logging (JSON) =====
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(jsonlogger.JsonFormatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
-root = logging.getLogger()
-root.handlers = [handler]
-root.setLevel(logging.INFO)
-log = logging.getLogger("slh.bot")
+# וידוא משתנים חיוניים
+if not TELEGRAM_BOT_TOKEN:
+    raise ValueError("TELEGRAM_BOT_TOKEN is required")
+if not SLH_API_BASE:
+    raise ValueError("SLH_API_BASE is required")
+if not PUBLIC_BOT_BASE:
+    raise ValueError("PUBLIC_BOT_BASE is required")
+if not PUBLIC_BOT_BASE.startswith("https://"):
+    raise RuntimeError("PUBLIC_BOT_BASE must be https://... (Telegram מחייב https)")
 
-# ===== helpers =====
-def is_admin(user_id: int) -> bool:
-    # MVP: אם APPROVED_CHAT_ID=0 => מאפשר פקודות אדמין למי שמוגדר לבדוק; אחרת – רק ה־ID הזה אדמין
-    return (APPROVED_CHAT_ID == 0) or (user_id == APPROVED_CHAT_ID)
+# קליינט HTTP
+client = httpx.AsyncClient(timeout=30.0)
 
-def api_headers(admin: bool = False) -> Dict[str, str]:
-    h = {"Content-Type": "application/json"}
-    if admin and ADMIN_TOKEN:
-        h["X-Admin-Token"] = ADMIN_TOKEN
-    return h
+headers = {"X-Admin-Token": ADMIN_TOKEN} if ADMIN_TOKEN else {}
 
-async def api_get(path: str, *, admin: bool = False, timeout: float = 10) -> Optional[Dict[str, Any]]:
-    if not SLH_API_BASE.startswith("http"):
-        raise RuntimeError("SLH_API_BASE must start with http(s)://")
-    url = f"{SLH_API_BASE}{path}"
-    async with httpx.AsyncClient(timeout=timeout) as cli:
-        r = await cli.get(url, headers=api_headers(admin=admin))
-        if r.status_code // 100 == 2:
-            try:
-                return r.json()
-            except Exception:
-                return {"ok": True, "text": r.text}
-        return {"ok": False, "status": r.status_code, "text": r.text}
+class SLHBot:
+    def __init__(self):
+        self.application = None
 
-async def api_post(path: str, body: Dict[str, Any], *, admin: bool = False, timeout: float = 15) -> Dict[str, Any]:
-    if not SLH_API_BASE.startswith("http"):
-        raise RuntimeError("SLH_API_BASE must start with http(s)://")
-    url = f"{SLH_API_BASE}{path}"
-    async with httpx.AsyncClient(timeout=timeout) as cli:
-        r = await cli.post(url, headers=api_headers(admin=admin), json=body)
+    async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /start"""
+        user = update.effective_user
+        chat_id = update.effective_chat.id
+        
         try:
-            js = r.json()
-        except Exception:
-            js = {"ok": r.status_code // 100 == 2, "text": r.text}
-        js.setdefault("ok", r.status_code // 100 == 2)
-        js.setdefault("status", r.status_code)
-        return js
+            # קבלת מחיר עדכני מה-API
+            price_response = await client.get(f"{SLH_API_BASE}/config/price")
+            price_data = price_response.json()
+            sela_price = price_data.get("sela_price_nis", 4.0)
+            
+            welcome_text = f"""
+👋 שלום {user.first_name}!
 
-def fmt_nis(x: float) -> str:
-    return f"{x:,.2f} ₪".replace(",", "'")
+ברוך הבא לקהילת SELA - המערכת הקהילתית למסחר SELA!
 
-# זיכרון מקומי לכתובת ארנק שנרשמה לכל צ׳אט (MVP)
-user_wallets: Dict[int, str] = {}
+💎 **מחיר SELA נוכחי:** {sela_price} ₪
 
-# ===== commands =====
-async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
+🤖 **מה אני יכול לעשות:**
+• `/price` - הצגת מחיר SELA עדכני
+• `/wallet <address>` - הצגת יתרת SELA בארנק שלך
+• `/unlock39` - הצטרפות לקהילה (39₪)
+• `/status` - סטטוס הנוכחי
 
-    price = await api_get("/config/price")
-    price_txt = "לא זמין"
-    if price and price.get("ok") and "price_nis" in price:
-        price_txt = fmt_nis(float(price["price_nis"]))
+🔗 **לאחר Unlock** תקבל גישה ל:
+• קישור לקבוצת הקהילה
+• אפשרויות שליחה וקבלה של SELA
+• עדכונים שוטפים
 
-    text = (
-        "ברוך הבא ל־SLH!\n\n"
-        "📜 *חזון*: כל אחד מקים חנות קלפים/אסימונים, כלכלה קהילתית חופשית, וארנק פרטי לניהול SELA.\n"
-        "🔑 גישה מלאה לארנק ולכלי קהילה ניתנת לאחר אימות תשלום של 39 ₪.\n"
-        f"💰 *מחיר SELA נוכחי*: {price_txt}\n\n"
-        "מה אפשר לעשות כאן?\n"
-        "• ‎/wallet <כתובת> — רישום/בדיקת כתובת BSC להצגת יתרות SELA\n"
-        "• ‎/price — הצגת מחיר SELA\n"
-        "• ‎/unlock39 — הסבר רכישה/אימות קבלה (39 ₪)\n"
-        "• ‎/join — קישור לקבוצת הקהילה (לאחר קבלה)\n"
-        "• ‎/status — סטטוס מערכת\n\n"
-        "למנהלים:\n"
-        "• ‎/approve <chat_id> — אישור משתמש מול ה־API\n"
-        "• ‎/set_price <nis>, ‎/set_min <nis>, ‎/set_group <invite>, ‎/add_account <type> <details>\n"
-    )
+הקלד /help לקבלת רשימת פקודות מלאה.
+            """
+            
+            await update.message.reply_text(welcome_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error in start command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בהתחברות למערכת. נסה שוב מאוחר יותר.")
 
-    kb = []
-    if GROUP_INVITE_LINK:
-        kb.append([InlineKeyboardButton("הצטרפות לקהילה", url=GROUP_INVITE_LINK)])
-    kb.append([InlineKeyboardButton("הצגת מחיר", callback_data="show_price")])
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /help"""
+        help_text = """
+📋 **רשימת פקודות:**
 
-    await ctx.bot.send_message(
-        chat_id=chat_id,
-        text=text,
-        reply_markup=InlineKeyboardMarkup(kb),
-        parse_mode="Markdown"
-    )
+**לכל המשתמשים:**
+• `/start` - התחל עבודה עם הבוט
+• `/price` - הצג מחיר SELA נוכחי
+• `/wallet <address>` - הצג יתרת SELA בארנק
+• `/unlock39` - הוראות הצטרפות לקהילה
+• `/status` - בדיקת סטטוס
 
-async def cmd_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    price = await api_get("/config/price")
-    if price and price.get("ok") and "price_nis" in price:
-        await ctx.bot.send_message(chat_id, f"מחיר SELA כרגע: {fmt_nis(float(price['price_nis']))}")
-    else:
-        await ctx.bot.send_message(chat_id, "לא הצלחתי להביא מחיר כרגע.")
+**למשתמשים מאושרים:**
+• `/join` - קבל קישור לקבוצת הקהילה
 
-async def cmd_wallet(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    args = ctx.args
-    if not args:
-        await ctx.bot.send_message(chat_id, "שימוש: ‎/wallet 0xYourBSCAddress")
-        return
-    addr = args[0].strip()
-    user_wallets[chat_id] = addr
+**למנהלים:**
+• `/approve <chat_id>` - אשר משתמש
+• `/set_price <price>` - שנה מחיר SELA
+• `/set_min <amount>` - שנה סכום Unlock מינימלי
+• `/set_group <link>` - הגדר קישור קבוצה
+• `/add_account <type> <details>` - הוסף חשבון תשלום
 
-    bal = await api_get(f"/token/balance/{addr}")
-    if not bal or not bal.get("ok"):
-        await ctx.bot.send_message(chat_id, "לא ניתן להביא יתרה כרגע.")
-        return
+📝 **דוגמאות:**
+`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`
+`/unlock39`
+        """
+        await update.message.reply_text(help_text, parse_mode=ParseMode.MARKDOWN)
 
-    text = f"✅ נקלטה הכתובת: `{addr}`\n"
-    if "symbol" in bal and "decimals" in bal and "balance" in bal:
-        sym = bal["symbol"]
-        dec = int(bal["decimals"])
-        raw = int(bal["balance"])
-        human = raw / (10 ** dec)
-        text += f"יתרת {sym}: {human}\n"
-    else:
-        text += f"יתרה: {bal}\n"
+    async def price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /price"""
+        try:
+            response = await client.get(f"{SLH_API_BASE}/config/price")
+            price_data = response.json()
+            sela_price = price_data.get("sela_price_nis", 4.0)
+            
+            price_text = f"""
+💎 **מחיר SELA נוכחי:**
 
-    await ctx.bot.send_message(chat_id, text, parse_mode="Markdown")
+💰 **{sela_price} ₪** לשקל
 
-async def cmd_unlock39(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    minv = await api_get("/config/min")
-    min_txt = "39"
-    if minv and minv.get("ok") and "min_nis" in minv:
-        min_txt = str(minv["min_nis"])
+המחיר מתעדכן באופן שוטף לפי תנאי השוק.
+            """
+            
+            await update.message.reply_text(price_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error getting price: {e}")
+            await update.message.reply_text("⚠️ לא ניתן לקבל מחיר עדכני כרגע. נסה שוב מאוחר יותר.")
 
-    accounts = await api_get("/config/accounts")
-    lines = []
-    if accounts and accounts.get("ok") and "accounts" in accounts and accounts["accounts"]:
-        for acc in accounts["accounts"]:
-            lines.append(f"• {acc}")
-    if not lines:
-        lines.append("• בנק הפועלים, סניף כפר גנים (153), חשבון 73462 — המוטב: קאופמן צביקה")
+    async def wallet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /wallet"""
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק כתובת ארנק. דוגמה:\n`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        wallet_address = context.args[0]
+        
+        try:
+            response = await client.get(f"{SLH_API_BASE}/token/balance/{wallet_address}")
+            balance_data = response.json()
+            
+            if "error" in balance_data:
+                await update.message.reply_text(f"❌ שגיאה: {balance_data['error']}")
+                return
+            
+            balance = balance_data.get("balance", 0)
+            
+            # קבלת מחיר נוכחי
+            price_response = await client.get(f"{SLH_API_BASE}/config/price")
+            price_data = price_response.json()
+            sela_price = price_data.get("sela_price_nis", 4.0)
+            
+            # חישוב ערך בשקלים
+            value_nis = balance * sela_price
+            
+            balance_text = f"""
+👛 **יתרת SELA**
 
-    msg = (
-        f"🔓 כדי לפתוח גישה מלאה, יש לשלם {min_txt} ₪.\n\n"
-        "חשבונות לתשלום:\n" + "\n".join(lines) + "\n\n"
-        "לאחר התשלום, שלח קבלה/צילום מסך – או העבר TxHash ב-/unlock_verify <txhash>.\n"
-        "אדמין יאשר אותך, או אימות אוטומטי בקרוב.\n"
-    )
-    await ctx.bot.send_message(chat_id, msg)
+📍 **כתובת:** `{wallet_address}`
+💎 **יתרה:** {balance:,.2f} SELA
+💰 **ערך נוכחי:** {value_nis:,.2f} ₪
 
-async def cmd_unlock_verify(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    if not ctx.args:
-        await ctx.bot.send_message(chat_id, "שימוש: ‎/unlock_verify <txhash | reference>")
-        return
-    ref = " ".join(ctx.args)
-    res = await api_post("/unlock/verify", {"chat_id": chat_id, "reference": ref})
-    if res.get("ok"):
-        await ctx.bot.send_message(chat_id, "הבקשה נקלטה. תקבל אישור לאחר בדיקה ✅")
-    else:
-        await ctx.bot.send_message(chat_id, "שגיאה באימות. נסה שוב בעוד רגע.")
+💡 *מחיר SELA: {sela_price} ₪*
+            """
+            
+            await update.message.reply_text(balance_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error getting wallet balance: {e}")
+            await update.message.reply_text("⚠️ שגיאה בקבלת יתרת הארנק. ודא שהכתובת תקינה ונסה שוב.")
 
-async def cmd_join(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    st = await api_get(f"/status/{chat_id}")
-    if st and st.get("ok") and st.get("unlocked"):
-        link = st.get("group_invite_link") or GROUP_INVITE_LINK or "לא הוגדר לינק לקבוצה."
-        await ctx.bot.send_message(chat_id, f"ברוך הבא! זה הקישור: {link}")
-    else:
-        await ctx.bot.send_message(chat_id, "עדיין לא מאושר. השלם אימות ב-/unlock39.")
+    async def unlock39_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /unlock39"""
+        chat_id = update.effective_chat.id
+        
+        try:
+            # קבלת קונפיג מה-API
+            config_response = await client.get(f"{SLH_API_BASE}/config")
+            config = config_response.json()
+            
+            min_nis = config.get("min_nis_to_unlock", 39)
+            payment_accounts = config.get("payment_accounts", [])
+            
+            # בדיקת סטטוס Unlock
+            status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
+            status = status_response.json()
+            
+            if status.get("approved"):
+                # כבר מאושר - שליחת קישור קבוצה
+                invite_link = config.get("community_invite_link", "")
+                if invite_link:
+                    await update.message.reply_text(
+                        f"✅ אתה כבר מאושר! הצטרף לקבוצה כאן: {invite_link}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await update.message.reply_text("✅ אתה כבר מאושר! קישור הקבוצה יישלח בהמשך.")
+                return
+            
+            if status.get("pending"):
+                await update.message.reply_text("⏳ הבקשה שלך ממתינה לאישור. נא להמתין לאישור מנהל.")
+                return
+            
+            # הוראות תשלום
+            payment_text = f"""
+🔓 **הצטרפות לקהילת SELA**
 
-async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    chat_id = update.effective_chat.id
-    h = await api_get("/healthz")
-    u = await api_get(f"/status/{chat_id}")
-    api_ok = bool(h and (h.get("ok") or "OK" in str(h)))
-    unlocked = bool(u and u.get("ok") and u.get("unlocked"))
-    await ctx.bot.send_message(chat_id, f"API: {'OK' if api_ok else 'DOWN'} | גישה: {'✅' if unlocked else '❌'}")
+💰 **עלות:** {min_nis} ₪
 
-# ===== admin commands =====
-async def cmd_approve(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    if not is_admin(user.id):
-        await ctx.bot.send_message(chat_id, "לא מורשה.")
-        return
-    if not ctx.args:
-        await ctx.bot.send_message(chat_id, "שימוש: ‎/approve <chat_id>")
-        return
-    tchat = int(ctx.args[0])
-    res = await api_post("/unlock/grant", {"chat_id": tchat}, admin=True)
-    await ctx.bot.send_message(chat_id, "✅ אושר" if res.get("ok") else f"❌ נכשל: {res}")
+**הוראות תשלום:**
 
-async def cmd_set_price(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    if not is_admin(user.id):
-        await ctx.bot.send_message(chat_id, "לא מורשה.")
-        return
-    if not ctx.args:
-        await ctx.bot.send_message(chat_id, "שימוש: ‎/set_price <nis>")
-        return
-    try:
-        val = float(ctx.args[0])
-    except Exception:
-        await ctx.bot.send_message(chat_id, "מספר לא חוקי.")
-        return
-    res = await api_post("/config/price", {"price_nis": val}, admin=True)
-    await ctx.bot.send_message(chat_id, f"{'עודכן ✅' if res.get('ok') else f'❌: {res}'}")
+1. העבר {min_nis} ₪ לאחד החשבונות הבאים:
+            """
+            
+            for i, account in enumerate(payment_accounts, 1):
+                acc_type = account.get("type", "חשבון")
+                details = account.get("details", "")
+                payment_text += f"\n{i}. **{acc_type}:** {details}"
+            
+            payment_text += f"""
 
-async def cmd_set_min(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    if not is_admin(user.id):
-        await ctx.bot.send_message(chat_id, "לא מורשה.")
-        return
-    if not ctx.args:
-        await ctx.bot.send_message(chat_id, "שימוש: ‎/set_min <nis>")
-        return
-    try:
-        val = int(float(ctx.args[0]))
-    except Exception:
-        await ctx.bot.send_message(chat_id, "מספר לא חוקי.")
-        return
-    res = await api_post("/config/min", {"min_nis": val}, admin=True)
-    await ctx.bot.send_message(chat_id, f"{'עודכן ✅' if res.get('ok') else f'❌: {res}'}")
+2. לאחר התשלום, שלח לנו את פרטי הארנק שלך עם הפקודה:
+`/wallet <your_wallet_address>`
 
-async def cmd_set_group(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    if not is_admin(user.id):
-        await ctx.bot.send_message(chat_id, "לא מורשה.")
-        return
-    if not ctx.args:
-        await ctx.bot.send_message(chat_id, "שימוש: ‎/set_group <invite_link>")
-        return
-    link = ctx.args[0]
-    res = await api_post("/config/group", {"invite": link}, admin=True)
-    await ctx.bot.send_message(chat_id, f"{'עודכן ✅' if res.get('ok') else f'❌: {res}'}")
+3. שלח את מספר העסקה או קבלה עם:
+`/unlock_verify <transaction_reference>`
 
-async def cmd_add_account(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    user = update.effective_user
-    chat_id = update.effective_chat.id
-    if not is_admin(user.id):
-        await ctx.bot.send_message(chat_id, "לא מורשה.")
-        return
-    if len(ctx.args) < 2:
-        await ctx.bot.send_message(chat_id, "שימוש: ‎/add_account <type> <details...>")
-        return
-    typ = ctx.args[0]
-    details = " ".join(ctx.args[1:])
-    res = await api_post("/config/account", {"type": typ, "details": details}, admin=True)
-    await ctx.bot.send_message(chat_id, f"{'נוסף ✅' if res.get('ok') else f'❌: {res}'}")
+📞 **לשאלות:** פנה למנהל המערכת.
 
-# ===== webhook bootstrap =====
-async def main() -> None:
-    if not BOT_TOKEN:
-        raise RuntimeError("TELEGRAM_BOT_TOKEN missing")
-    if not SLH_API_BASE.startswith("http"):
-        raise RuntimeError("SLH_API_BASE must be http(s)://")
-    if not PUBLIC_BOT_BASE.startswith("https://"):
-        raise RuntimeError("PUBLIC_BOT_BASE must be https://... (Telegram מחייב https)")
+💡 *לאחר אישור התשלום תקבל גישה מלאה לקהילה!*
+            """
+            
+            await update.message.reply_text(payment_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error in unlock39 command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בהצגת הוראות התשלום. נסה שוב מאוחר יותר.")
 
-    app: Application = ApplicationBuilder().token(BOT_TOKEN).build()
+    async def unlock_verify_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /unlock_verify"""
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק מזהה תשלום. דוגמה:\n`/unlock_verify TX123456789`")
+            return
+        
+        payment_ref = context.args[0]
+        chat_id = update.effective_chat.id
+        
+        try:
+            # שליחת בקשת אימות ל-API
+            verify_data = {
+                "chat_id": chat_id,
+                "wallet_address": "to_be_provided",  # המשתמש צריך להזין כתובת קודם
+                "payment_ref": payment_ref
+            }
+            
+            response = await client.post(
+                f"{SLH_API_BASE}/unlock/verify",
+                json=verify_data,
+                headers=headers
+            )
+            
+            result = response.json()
+            
+            if result.get("status") == "pending_approval":
+                await update.message.reply_text("✅ בקשתך התקבלה וממתינה לאישור. תתעדכן כאשר תאושר.")
+                
+                # הודעה למנהל
+                if ADMIN_CHAT_ID:
+                    admin_msg = f"🔔 בקשה חדשה לאישור!\nמשתמש: {chat_id}\nמזהה תשלום: {payment_ref}"
+                    await context.bot.send_message(ADMIN_CHAT_ID, admin_msg)
+                    
+            elif result.get("status") == "already_approved":
+                await update.message.reply_text("✅ אתה כבר מאושר! השתמש ב-/join כדי לקבל קישור קבוצה.")
+            elif result.get("status") == "already_pending":
+                await update.message.reply_text("⏳ כבר יש לך בקשה ממתינה לאישור.")
+            else:
+                await update.message.reply_text("⚠️ שגיאה ברישום הבקשה. נסה שוב.")
+                
+        except Exception as e:
+            logger.error(f"Error in unlock_verify: {e}")
+            await update.message.reply_text("⚠️ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.")
 
-    # handlers
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("price", cmd_price))
-    app.add_handler(CommandHandler("wallet", cmd_wallet))
-    app.add_handler(CommandHandler("unlock39", cmd_unlock39))
-    app.add_handler(CommandHandler("unlock_verify", cmd_unlock_verify))
-    app.add_handler(CommandHandler("join", cmd_join))
-    app.add_handler(CommandHandler("status", cmd_status))
+    async def join_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /join"""
+        chat_id = update.effective_chat.id
+        
+        try:
+            # בדיקת סטטוס
+            status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
+            status = status_response.json()
+            
+            if not status.get("approved"):
+                await update.message.reply_text("❌ אתה עדיין לא מאושר. השתמש ב-/unlock39 כדי להצטרף.")
+                return
+            
+            # קבלת קישור קבוצה
+            config_response = await client.get(f"{SLH_API_BASE}/config")
+            config = config_response.json()
+            
+            invite_link = config.get("community_invite_link", "")
+            
+            if invite_link:
+                await update.message.reply_text(
+                    f"🎉 ברוך הבא לקהילה! הצטרף כאן: {invite_link}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text("✅ אתה מאושר! קישור הקבוצה יישלח בהמשך.")
+                
+        except Exception as e:
+            logger.error(f"Error in join command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בקבלת קישור הקבוצה. נסה שוב מאוחר יותר.")
 
-    app.add_handler(CommandHandler("approve", cmd_approve))
-    app.add_handler(CommandHandler("set_price", cmd_set_price))
-    app.add_handler(CommandHandler("set_min", cmd_set_min))
-    app.add_handler(CommandHandler("set_group", cmd_set_group))
-    app.add_handler(CommandHandler("add_account", cmd_add_account))
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /status"""
+        chat_id = update.effective_chat.id
+        
+        try:
+            # בדיקת סטטוס API
+            health_response = await client.get(f"{SLH_API_BASE}/healthz")
+            api_status = "🟢 פעיל" if health_response.status_code == 200 else "🔴 לא פעיל"
+            
+            # בדיקת סטטוס Unlock
+            status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
+            status = status_response.json()
+            
+            unlock_status = "🟢 מאושר" if status.get("approved") else "🟡 ממתין" if status.get("pending") else "🔴 לא מאושר"
+            
+            status_text = f"""
+📊 **סטטוס מערכת**
 
-    # webhook
-    webhook_url = f"{PUBLIC_BOT_BASE}/tg"
-    log.info(f"Setting webhook to {webhook_url}")
+🤖 **בוט:** 🟢 פעיל
+🔗 **API:** {api_status}
+🔓 **סטטוס Unlock:** {unlock_status}
 
-    await app.updater.start_webhook(
-        listen="0.0.0.0", port=int(os.getenv("PORT", "8080")), url_path="tg",
-        webhook_url=webhook_url
-    )
-    log.info("Application started")
-    await asyncio.Event().wait()
+💡 **פרטים:**
+• **מזהה צ'אט:** {chat_id}
+• **API Base:** {SLH_API_BASE}
+            """
+            
+            await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error in status command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בבדיקת סטטוס. ה-API כנראה לא זמין.")
+
+    # פקודות מנהל
+    async def approve_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /approve למנהלים"""
+        if update.effective_chat.id != ADMIN_CHAT_ID:
+            await update.message.reply_text("❌ גישה נדחתה - מנהל בלבד.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק מזהה צ'אט. דוגמה: `/approve 123456789`", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        try:
+            chat_id = int(context.args[0])
+            
+            response = await client.post(
+                f"{SLH_API_BASE}/unlock/grant",
+                params={"chat_id": chat_id},
+                headers=headers
+            )
+            
+            result = response.json()
+            
+            if result.get("status") == "approved":
+                await update.message.reply_text(f"✅ משתמש {chat_id} אושר בהצלחה!")
+                
+                # הודעה למשתמש
+                try:
+                    await context.bot.send_message(
+                        chat_id, 
+                        "🎉 **הבקשה שלך אושרה!**\n\nכעת אתה חבר בקהילת SELA. השתמש ב-/join כדי לקבל קישור לקבוצה.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error(f"Could not notify user {chat_id}: {e}")
+                    
+            else:
+                await update.message.reply_text("❌ שגיאה באישור המשתמש.")
+                
+        except Exception as e:
+            logger.error(f"Error in approve command: {e}")
+            await update.message.reply_text("⚠️ שגיאה באישור המשתמש.")
+
+    async def set_price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /set_price למנהלים"""
+        if update.effective_chat.id != ADMIN_CHAT_ID:
+            await update.message.reply_text("❌ גישה נדחתה - מנהל בלבד.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק מחיר. דוגמה: `/set_price 4.5`", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        try:
+            new_price = float(context.args[0])
+            
+            response = await client.post(
+                f"{SLH_API_BASE}/config/price",
+                json={"sela_price_nis": new_price},
+                headers=headers
+            )
+            
+            result = response.json()
+            
+            if result.get("status") == "price_updated":
+                await update.message.reply_text(f"✅ מחיר SELA עודכן ל-{new_price} ₪")
+            else:
+                await update.message.reply_text("❌ שגיאה בעדכון המחיר.")
+                
+        except Exception as e:
+            logger.error(f"Error in set_price command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בעדכון המחיר.")
+
+    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """טיפול בשגיאות"""
+        logger.error(f"Exception while handling an update: {context.error}")
+        
+        try:
+            if update and update.effective_chat:
+                await update.effective_chat.send_message(
+                    "❌ אירעה שגיאה בבוט. אנא נסה שוב מאוחר יותר."
+                )
+        except Exception as e:
+            logger.error(f"Error in error handler: {e}")
+
+    def setup_handlers(self):
+        """הגדרת handlers"""
+        # handlers בסיסיים
+        self.application.add_handler(CommandHandler("start", self.start))
+        self.application.add_handler(CommandHandler("help", self.help_command))
+        self.application.add_handler(CommandHandler("price", self.price_command))
+        self.application.add_handler(CommandHandler("wallet", self.wallet_command))
+        self.application.add_handler(CommandHandler("unlock39", self.unlock39_command))
+        self.application.add_handler(CommandHandler("unlock_verify", self.unlock_verify_command))
+        self.application.add_handler(CommandHandler("join", self.join_command))
+        self.application.add_handler(CommandHandler("status", self.status_command))
+        
+        # handlers מנהלים
+        self.application.add_handler(CommandHandler("approve", self.approve_command))
+        self.application.add_handler(CommandHandler("set_price", self.set_price_command))
+        
+        # handler שגיאות
+        self.application.add_error_handler(self.error_handler)
+
+    async def setup_webhook(self):
+        """הגדרת webhook"""
+        webhook_url = f"{PUBLIC_BOT_BASE}/tg"
+        await self.application.bot.set_webhook(webhook_url)
+        logger.info(f"Webhook set to: {webhook_url}")
+
+    async def run(self):
+        """הרצת הבוט"""
+        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+        
+        self.setup_handlers()
+        await self.setup_webhook()
+        
+        # הרצת הבוט
+        logger.info("Bot is starting...")
+        await self.application.run_polling()
+
+async def main():
+    """פונקציה ראשית"""
+    bot = SLHBot()
+    await bot.run()
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except Exception as e:
-        log.exception("Bot crashed: %s", e)
-        raise
+    asyncio.run(main())
