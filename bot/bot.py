@@ -97,6 +97,7 @@ class SLHBot:
 🔗 **לאחר Unlock** תקבל גישה ל:
 • קישור לקבוצת הקהילה
 • אפשרויות שליחה וקבלה של SELA
+• פלטפורמת מסחר למכירת SELA
 • עדכונים שוטפים
 
 הקלד /help לקבלת רשימת פקודות מלאה.
@@ -123,10 +124,13 @@ class SLHBot:
 
 **למשתמשים מאושרים:**
 • `/join` - קבל קישור לקבוצת הקהילה
+• `/send <address> <amount>` - שלח SELA לכתובת
+• `/balance` - הצג יתרה מפורטת
 
 **למנהלים:**
 • `/approve <chat_id>` - אשר משתמש
 • `/set_price <price>` - שנה מחיר SELA
+• `/pending` - הצג בקשות ממתינות
 
 📝 **דוגמאות:**
 `/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`
@@ -159,7 +163,365 @@ class SLHBot:
             logger.error(f"Error getting price: {e}")
             await update.message.reply_text("⚠️ לא ניתן לקבל מחיר עדכני כרגע. נסה שוב מאוחר יותר.")
 
-    # ... (כל שאר הפקודות נשארות כמו בקוד הקודם)
+    async def wallet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /wallet"""
+        if not self.is_configured:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק כתובת ארנק. דוגמה:\n`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        wallet_address = context.args[0]
+        
+        try:
+            response = await client.get(f"{SLH_API_BASE}/token/balance/{wallet_address}")
+            balance_data = response.json()
+            
+            if "error" in balance_data:
+                await update.message.reply_text(f"❌ שגיאה: {balance_data['error']}")
+                return
+            
+            balance = balance_data.get("balance", 0)
+            symbol = balance_data.get("symbol", "SELA")
+            
+            # קבלת מחיר נוכחי
+            price_response = await client.get(f"{SLH_API_BASE}/config/price")
+            price_data = price_response.json()
+            sela_price = price_data.get("sela_price_nis", 4.0)
+            
+            # חישוב ערך בשקלים
+            value_nis = balance * sela_price
+            
+            balance_text = f"""
+👛 **יתרת {symbol}**
+
+📍 **כתובת:** `{wallet_address}`
+💎 **יתרה:** {balance:,.2f} {symbol}
+💰 **ערך נוכחי:** {value_nis:,.2f} ₪
+
+💡 *מחיר {symbol}: {sela_price} ₪*
+            """
+            
+            await update.message.reply_text(balance_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error getting wallet balance: {e}")
+            await update.message.reply_text("⚠️ שגיאה בקבלת יתרת הארנק. ודא שהכתובת תקינה ונסה שוב.")
+
+    async def unlock39_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /unlock39"""
+        if not self.is_configured:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        chat_id = update.effective_chat.id
+        
+        try:
+            # קבלת קונפיג מה-API
+            config_response = await client.get(f"{SLH_API_BASE}/config")
+            config = config_response.json()
+            
+            min_nis = config.get("min_nis_to_unlock", 39)
+            payment_accounts = config.get("payment_accounts", [])
+            
+            # בדיקת סטטוס Unlock
+            status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
+            status = status_response.json()
+            
+            if status.get("approved"):
+                # כבר מאושר - שליחת קישור קבוצה
+                invite_link = config.get("community_invite_link", "")
+                if invite_link:
+                    await update.message.reply_text(
+                        f"✅ אתה כבר מאושר! הצטרף לקבוצה כאן: {invite_link}",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                else:
+                    await update.message.reply_text("✅ אתה כבר מאושר! קישור הקבוצה יישלח בהמשך.")
+                return
+            
+            if status.get("pending"):
+                await update.message.reply_text("⏳ הבקשה שלך ממתינה לאישור. נא להמתין לאישור מנהל.")
+                return
+            
+            # הוראות תשלום
+            payment_text = f"""
+🔓 **הצטרפות לקהילת SELA**
+
+💰 **עלות:** {min_nis} ₪
+
+**הוראות תשלום:**
+
+1. העבר {min_nis} ₪ לאחד החשבונות הבאים:
+"""
+            
+            if payment_accounts:
+                for i, account in enumerate(payment_accounts, 1):
+                    acc_type = account.get("type", "חשבון")
+                    details = account.get("details", "")
+                    payment_text += f"\n{i}. **{acc_type}:** {details}"
+            else:
+                payment_text += "\n**בנק: פועלים**\n**סניף: 153**\n**חשבון: 73462**\n**שם: קאופמן צביקה**"
+            
+            payment_text += f"""
+
+2. לאחר התשלום, שלח לנו את פרטי הארנק שלך עם הפקודה:
+`/wallet <your_wallet_address>`
+
+3. שלח את מספר העסקה או קבלה עם:
+`/unlock_verify <transaction_reference>`
+
+📞 **לשאלות:** פנה למנהל המערכת.
+
+💡 *לאחר אישור התשלום תקבל גישה מלאה לקהילה!*
+            """
+            
+            await update.message.reply_text(payment_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error in unlock39 command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בהצגת הוראות התשלום. נסה שוב מאוחר יותר.")
+
+    async def unlock_verify_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /unlock_verify"""
+        if not self.is_configured:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק מזהה תשלום. דוגמה:\n`/unlock_verify TX123456789`")
+            return
+        
+        payment_ref = context.args[0]
+        chat_id = update.effective_chat.id
+        
+        try:
+            # שליחת בקשת אימות ל-API
+            verify_data = {
+                "chat_id": chat_id,
+                "wallet_address": "to_be_provided",
+                "payment_ref": payment_ref
+            }
+            
+            response = await client.post(
+                f"{SLH_API_BASE}/unlock/verify",
+                json=verify_data,
+                headers=headers
+            )
+            
+            result = response.json()
+            
+            if result.get("status") == "pending_approval":
+                await update.message.reply_text("✅ בקשתך התקבלה וממתינה לאישור. תתעדכן כאשר תאושר.")
+                
+                # הודעה למנהל
+                if ADMIN_CHAT_ID:
+                    admin_msg = f"🔔 בקשה חדשה לאישור!\nמשתמש: {chat_id}\nמזהה תשלום: {payment_ref}"
+                    await context.bot.send_message(ADMIN_CHAT_ID, admin_msg)
+                    
+            elif result.get("status") == "already_approved":
+                await update.message.reply_text("✅ אתה כבר מאושר! השתמש ב-/join כדי לקבל קישור קבוצה.")
+            elif result.get("status") == "already_pending":
+                await update.message.reply_text("⏳ כבר יש לך בקשה ממתינה לאישור.")
+            else:
+                await update.message.reply_text("⚠️ שגיאה ברישום הבקשה. נסה שוב.")
+                
+        except Exception as e:
+            logger.error(f"Error in unlock_verify: {e}")
+            await update.message.reply_text("⚠️ שגיאה בשליחת הבקשה. נסה שוב מאוחר יותר.")
+
+    async def join_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /join"""
+        if not self.is_configured:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        chat_id = update.effective_chat.id
+        
+        try:
+            # בדיקת סטטוס
+            status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
+            status = status_response.json()
+            
+            if not status.get("approved"):
+                await update.message.reply_text("❌ אתה עדיין לא מאושר. השתמש ב-/unlock39 כדי להצטרף.")
+                return
+            
+            # קבלת קישור קבוצה
+            config_response = await client.get(f"{SLH_API_BASE}/config")
+            config = config_response.json()
+            
+            invite_link = config.get("community_invite_link", "")
+            
+            if invite_link:
+                await update.message.reply_text(
+                    f"🎉 ברוך הבא לקהילה! הצטרף כאן: {invite_link}",
+                    parse_mode=ParseMode.MARKDOWN
+                )
+            else:
+                await update.message.reply_text("✅ אתה מאושר! קישור הקבוצה יישלח בהמשך.")
+                
+        except Exception as e:
+            logger.error(f"Error in join command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בקבלת קישור הקבוצה. נסה שוב מאוחר יותר.")
+
+    async def status_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /status"""
+        chat_id = update.effective_chat.id
+        
+        # בדיקת תצורת הבוט
+        bot_status = "🟢 פעיל" if self.is_configured else "🔴 לא מוגדר"
+        
+        try:
+            # בדיקת סטטוס API
+            health_response = await client.get(f"{SLH_API_BASE}/healthz")
+            api_status = "🟢 פעיל" if health_response.status_code == 200 else "🔴 לא פעיל"
+            
+            # בדיקת סטטוס Unlock
+            status_response = await client.get(f"{SLH_API_BASE}/unlock/status/{chat_id}")
+            status = status_response.json()
+            
+            unlock_status = "🟢 מאושר" if status.get("approved") else "🟡 ממתין" if status.get("pending") else "🔴 לא מאושר"
+            
+            status_text = f"""
+📊 **סטטוס מערכת**
+
+🤖 **בוט:** {bot_status}
+🔗 **API:** {api_status}
+🔓 **סטטוס Unlock:** {unlock_status}
+
+💡 **פרטים:**
+• **מזהה צ'אט:** {chat_id}
+• **API Base:** {SLH_API_BASE}
+            """
+            
+            await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error in status command: {e}")
+            status_text = f"""
+📊 **סטטוס מערכת**
+
+🤖 **בוט:** {bot_status}
+🔗 **API:** 🔴 לא זמין
+🔓 **סטטוס Unlock:** 🔴 לא ידוע
+
+⚠️ **ה-API לא זמין כרגע**
+            """
+            await update.message.reply_text(status_text, parse_mode=ParseMode.MARKDOWN)
+
+    async def approve_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /approve למנהלים"""
+        if not self.is_configured:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        if update.effective_chat.id != ADMIN_CHAT_ID:
+            await update.message.reply_text("❌ גישה נדחתה - מנהל בלבד.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק מזהה צ'אט. דוגמה: `/approve 123456789`", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        try:
+            chat_id = int(context.args[0])
+            
+            response = await client.post(
+                f"{SLH_API_BASE}/unlock/grant",
+                params={"chat_id": chat_id},
+                headers=headers
+            )
+            
+            result = response.json()
+            
+            if result.get("status") == "approved":
+                await update.message.reply_text(f"✅ משתמש {chat_id} אושר בהצלחה!")
+                
+                # הודעה למשתמש
+                try:
+                    await context.bot.send_message(
+                        chat_id, 
+                        "🎉 **הבקשה שלך אושרה!**\n\nכעת אתה חבר בקהילת SELA. השתמש ב-/join כדי לקבל קישור לקבוצה.",
+                        parse_mode=ParseMode.MARKDOWN
+                    )
+                except Exception as e:
+                    logger.error(f"Could not notify user {chat_id}: {e}")
+                    
+            else:
+                await update.message.reply_text("❌ שגיאה באישור המשתמש.")
+                
+        except Exception as e:
+            logger.error(f"Error in approve command: {e}")
+            await update.message.reply_text("⚠️ שגיאה באישור המשתמש.")
+
+    async def set_price_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /set_price למנהלים"""
+        if not self.is_configured:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        if update.effective_chat.id != ADMIN_CHAT_ID:
+            await update.message.reply_text("❌ גישה נדחתה - מנהל בלבד.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text("❌ אנא ספק מחיר. דוגמה: `/set_price 4.5`", parse_mode=ParseMode.MARKDOWN)
+            return
+        
+        try:
+            new_price = float(context.args[0])
+            
+            response = await client.post(
+                f"{SLH_API_BASE}/config/price",
+                json={"sela_price_nis": new_price},
+                headers=headers
+            )
+            
+            result = response.json()
+            
+            if result.get("status") == "price_updated":
+                await update.message.reply_text(f"✅ מחיר SELA עודכן ל-{new_price} ₪")
+            else:
+                await update.message.reply_text("❌ שגיאה בעדכון המחיר.")
+                
+        except Exception as e:
+            logger.error(f"Error in set_price command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בעדכון המחיר.")
+
+    async def pending_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /pending למנהלים"""
+        if not self.is_configured:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        if update.effective_chat.id != ADMIN_CHAT_ID:
+            await update.message.reply_text("❌ גישה נדחתה - מנהל בלבד.")
+            return
+        
+        try:
+            response = await client.get(f"{SLH_API_BASE}/unlock/pending", headers=headers)
+            pending_data = response.json()
+            
+            pending_list = pending_data.get("pending", [])
+            
+            if not pending_list:
+                await update.message.reply_text("📭 אין בקשות ממתינות.")
+                return
+            
+            pending_text = "📋 **בקשות ממתינות לאישור:**\n\n"
+            for i, request in enumerate(pending_list, 1):
+                pending_text += f"{i}. **משתמש:** {request.get('chat_id')}\n"
+                pending_text += f"   **כתובת:** `{request.get('wallet_address', 'לא צוין')}`\n"
+                pending_text += f"   **מזהה תשלום:** {request.get('payment_ref', 'לא צוין')}\n\n"
+            
+            await update.message.reply_text(pending_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error in pending command: {e}")
+            await update.message.reply_text("⚠️ שגיאה בקבלת רשימת הממתינים.")
 
     async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """טיפול בשגיאות"""
@@ -188,6 +550,7 @@ class SLHBot:
         # handlers מנהלים
         self.application.add_handler(CommandHandler("approve", self.approve_command))
         self.application.add_handler(CommandHandler("set_price", self.set_price_command))
+        self.application.add_handler(CommandHandler("pending", self.pending_command))
         
         # handler שגיאות
         self.application.add_error_handler(self.error_handler)
@@ -230,7 +593,7 @@ async def webhook(request: Request):
     """Endpoint לקבלת עדכונים מטלגרם - שינוי ל-/"""
     try:
         json_data = await request.json()
-        logger.info(f"📨 Received webhook update: {json_data}")
+        logger.info(f"📨 Received webhook update for chat: {json_data.get('message', {}).get('chat', {}).get('id')}")
         update = Update.de_json(json_data, bot_instance.application.bot)
         await bot_instance.application.process_update(update)
         return {"status": "ok"}
