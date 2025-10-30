@@ -169,11 +169,19 @@ def get_token_contract():
 
 # Dependency for admin authentication
 def verify_admin_token(x_admin_token: str = Header(...)):
-    if x_admin_token != os.getenv("ADMIN_TOKEN"):
+    admin_token = os.getenv("ADMIN_TOKEN")
+    if not admin_token:
+        logger.error("ADMIN_TOKEN not set in environment")
+        raise HTTPException(status_code=500, detail="Admin token not configured")
+    if x_admin_token != admin_token:
         raise HTTPException(status_code=403, detail="Admin token required")
     return True
 
 # endpoints
+@app.get("/")
+async def root():
+    return {"message": "SLH API is running", "version": "1.0.0"}
+
 @app.get("/healthz")
 async def health_check():
     web3_status = "connected" if w3 and w3.is_connected() else "disconnected"
@@ -186,6 +194,7 @@ async def health_check():
 
 @app.get("/config")
 async def get_config():
+    logger.info("GET /config called")
     return load_config()
 
 @app.post("/config")
@@ -211,6 +220,7 @@ async def update_config(
 
 @app.get("/config/price")
 async def get_price():
+    logger.info("GET /config/price called")
     config = load_config()
     return {"sela_price_nis": config["sela_price_nis"]}
 
@@ -226,6 +236,7 @@ async def set_price(price_data: dict, is_admin: bool = Depends(verify_admin_toke
 
 @app.get("/token/balance/{address}")
 async def get_token_balance(address: str):
+    logger.info(f"GET /token/balance/{address} called")
     try:
         if not w3:
             return {"error": "Web3 not connected", "balance": 0}
