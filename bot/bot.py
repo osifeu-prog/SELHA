@@ -5,7 +5,8 @@ import httpx
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
 from telegram.constants import ParseMode
-import json
+from fastapi import FastAPI, Request
+import uvicorn
 
 # הגדרת לוגר
 logging.basicConfig(
@@ -35,6 +36,7 @@ try:
     # משתני סביבה אופציונליים
     ADMIN_TOKEN = get_optional_env("ADMIN_TOKEN")
     ADMIN_CHAT_ID = int(get_optional_env("ADMIN_CHAT_ID", "0"))
+    PORT = int(get_optional_env("PORT", "8080"))
     
     # וידוא ש-PUBLIC_BOT_BASE הוא HTTPS
     if not PUBLIC_BOT_BASE.startswith("https://"):
@@ -50,11 +52,15 @@ except ValueError as e:
     PUBLIC_BOT_BASE = None
     ADMIN_TOKEN = None
     ADMIN_CHAT_ID = 0
+    PORT = 8080
 
 # קליינט HTTP
 client = httpx.AsyncClient(timeout=30.0)
 
 headers = {"X-Admin-Token": ADMIN_TOKEN} if ADMIN_TOKEN else {}
+
+# יצירת אפליקציית FastAPI
+app = FastAPI(title="SLH Bot Webhook")
 
 class SLHBot:
     def __init__(self):
@@ -282,7 +288,7 @@ class SLHBot:
             # שליחת בקשת אימות ל-API
             verify_data = {
                 "chat_id": chat_id,
-                "wallet_address": "to_be_provided",  # המשתמש צריך להזין כתובת קודם
+                "wallet_address": "to_be_provided",
                 "payment_ref": payment_ref
             }
             
@@ -486,7 +492,7 @@ class SLHBot:
             logger.error(f"Error in error handler: {e}")
 
     def setup_handlers(self):
-        """הגדרת handlers - השיטה החסרה!"""
+        """הגדרת handlers"""
         # handlers בסיסיים
         self.application.add_handler(CommandHandler("start", self.start))
         self.application.add_handler(CommandHandler("help", self.help_command))
@@ -511,32 +517,78 @@ class SLHBot:
             return
             
         try:
-            webhook_url = f"{PUBLIC_BOT_BASE}/tg"
+            webhook_url = f"{PUBLIC_BOT_BASE}/webhook"
             await self.application.bot.set_webhook(webhook_url)
             logger.info(f"✅ Webhook set to: {webhook_url}")
         except Exception as e:
             logger.error(f"❌ Error setting webhook: {e}")
 
-    async def run(self):
-        """הרצת הבוט"""
+    async def initialize(self):
+        """אתחול הבוט"""
         if not self.is_configured:
             logger.error("❌ Bot not configured - missing required environment variables")
-            logger.error("Required: TELEGRAM_BOT_TOKEN, SLH_API_BASE, PUBLIC_BOT_BASE")
-            return
+            return False
             
-        self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-        
-        self.setup_handlers()  # עכשיו השיטה קיימת!
-        await self.setup_webhook()
-        
-        # הרצת הבוט
-        logger.info("✅ Bot is starting...")
-        await self.application.run_polling()
+        try:
+            self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+            self.setup_handlers()
+            await self.setup_webhook()
+            logger.info("✅ Bot initialized successfully")
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error initializing bot: {e}")
+            return False
+
+# יצירת instance גלובלי של הבוט
+bot_instance = SLHBot()
+
+@app.post("/webhook")
+async def webhook(request: Request):
+    """Endpoint לקבלת עדכונים מטלגרם"""
+    try:
+        json_data = await request.json()
+        update = Update.de_json(json_data, bot_instance.application.bot)
+        await bot_instance.application.process_update(update)
+        return {"status": "ok"}
+    except Exception as e:
+        logger.error(f"Error in webhook: {e}")
+        return {"status": "error", "message": str(e)}
+
+@app.get("/health")
+async def health_check():
+    """Health check endpoint"""
+    return {
+        "status": "healthy", 
+        "service": "SLH Bot",
+        "configured": bot_instance.is_configured
+    }
+
+@app.get("/")
+async def root():
+    """Root endpoint"""
+    return {
+        "message": "SLH Bot is running",
+        "webhook_url": f"{PUBLIC_BOT_BASE}/webhook",
+        "configured": bot_instance.is_configured
+    }
 
 async def main():
     """פונקציה ראשית"""
-    bot = SLHBot()
-    await bot.run()
+    success = await bot_instance.initialize()
+    if not success:
+        logger.error("❌ Failed to initialize bot. Check environment variables.")
+        return
+    
+    # הרצת שרת FastAPI
+    config = uvicorn.Config(
+        app, 
+        host="0.0.0.0", 
+        port=PORT,
+        log_level="info"
+    )
+    server = uvicorn.Server(config)
+    logger.info(f"✅ Starting webhook server on port {PORT}")
+    await server.serve()
 
 if __name__ == "__main__":
     asyncio.run(main())
