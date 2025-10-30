@@ -1,0 +1,19 @@
+version: "3.9"
+services:
+  slh_api:
+    build: ./api
+    environment:
+      - BSC_RPC_URL=${BSC_RPC_URL}
+      - CHAIN_ID=${CHAIN_ID}
+      - SELA_TOKEN_ADDRESS=${SELA_TOKEN_ADDRESS}
+      - TREASURY_ADDRESS=${TREASURY_ADDRESS}
+      - TREASURY_PRIVATE_KEY=${TREASURY_PRIVATE_KEY}
+    ports: ["8081:8080"]
+
+  slh_bot:
+    build: ./bot
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - WEBHOOK_URL=http://host.docker.internal:8082/tg
+      - LOG_LEVEL=DEBUG
+    ports: ["8082:8080"]
