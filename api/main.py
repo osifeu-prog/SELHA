@@ -13,7 +13,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configuration
+# Configuration - חשוב: Railway מספק PORT אוטומטית
+PORT = int(os.getenv("PORT", 8080))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
 BSC_RPC_URL = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
 SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS", "0xACb0A09414CEA1C879c67bB7A877E4e19480f022")
@@ -33,6 +34,7 @@ app = FastAPI(title="SLH API", description="SELA Community Trading API")
 logger.info("🚀 SLH API Starting Up...")
 logger.info(f"📁 Current Directory: {os.getcwd()}")
 logger.info(f"📁 Files in current dir: {os.listdir('.')}")
+logger.info(f"🔌 Using PORT: {PORT}")
 
 # CORS
 app.add_middleware(
@@ -202,7 +204,8 @@ async def root():
     return {
         "message": "SLH API - SELA Community Trading System", 
         "status": "operational",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "port": PORT
     }
 
 @app.get("/healthz")
@@ -213,7 +216,8 @@ async def health_check():
         "status": "healthy" if web3_status else "degraded",
         "web3_connected": web3_status,
         "chain_id": w3.eth.chain_id if web3_status else None,
-        "service": "SLH API"
+        "service": "SLH API",
+        "port": PORT
     }
 
 @app.get("/config")
@@ -411,4 +415,4 @@ async def get_pending_requests(x_admin_token: str = Header(None)):
 
 logger.info("✅ All routes registered successfully")
 
-# No uvicorn.run here - Railway handles this
+# חשוב: אין קריאה ל-uvicorn.run - Railway מריץ אוטומטית
