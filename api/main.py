@@ -13,11 +13,12 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-# Configuration - BSC Mainnet
+# Configuration - Ethereum Mainnet עם Etherscan
 PORT = int(os.getenv("PORT", 8080))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN")
-BSC_RPC_URL = os.getenv("BSC_RPC_URL", "https://bsc-dataseed.binance.org/")
-SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS", "0xACb0A09414CEA1C879c67bB7A877E4e19480f022")
+ETH_RPC_URL = os.getenv("ETH_RPC_URL", "https://eth.llamarpc.com")
+SELA_TOKEN_ADDRESS = os.getenv("SELA_TOKEN_ADDRESS", "0x693db6c817083818696a7228aEbfBd0Cd3371f02")
+ETHERSCAN_API_KEY = os.getenv("ETHERSCAN_API_KEY", "YourApiKeyToken")
 MIN_NIS_TO_UNLOCK = int(os.getenv("MIN_NIS_TO_UNLOCK", "39"))
 
 # Setup logging
@@ -32,8 +33,9 @@ app = FastAPI(title="SLH API", description="SELA Community Trading System")
 
 # Debug - log startup
 logger.info("🚀 SLH API Starting Up...")
-logger.info(f"🔗 BSC RPC: {BSC_RPC_URL}")
+logger.info(f"🔗 Ethereum RPC: {ETH_RPC_URL}")
 logger.info(f"🏷️ SELA Token Address: {SELA_TOKEN_ADDRESS}")
+logger.info(f"🔑 Etherscan API: {'Configured' if ETHERSCAN_API_KEY else 'Not configured'}")
 
 # CORS
 app.add_middleware(
@@ -44,19 +46,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize Web3
+# Initialize Web3 - Ethereum Mainnet
 try:
-    w3 = Web3(Web3.HTTPProvider(BSC_RPC_URL))
+    w3 = Web3(Web3.HTTPProvider(ETH_RPC_URL))
     if w3.is_connected():
-        logger.info(f"✅ Connected to BSC Mainnet. Chain ID: {w3.eth.chain_id}")
+        logger.info(f"✅ Connected to Ethereum Mainnet. Chain ID: {w3.eth.chain_id}")
     else:
-        logger.error("❌ Failed to connect to BSC")
+        logger.error("❌ Failed to connect to Ethereum")
         w3 = None
 except Exception as e:
     logger.error(f"❌ Web3 connection error: {e}")
     w3 = None
 
-# ABI מלא לטוקן ERC-20 (מתוקן)
+# ABI מלא לטוקן ERC-20
 ERC20_ABI = [
     {
         "constant": True,
@@ -115,40 +117,44 @@ if w3 and SELA_TOKEN_ADDRESS:
         if is_contract:
             token_contract = w3.eth.contract(address=checksum_address, abi=ERC20_ABI)
             
-            # נסה לקבל מידע על הטוקן
             try:
                 symbol = token_contract.functions.symbol().call()
                 name = token_contract.functions.name().call()
                 decimals = token_contract.functions.decimals().call()
+                total_supply = token_contract.functions.totalSupply().call()
                 
                 token_info = {
                     "symbol": symbol,
                     "name": name,
                     "decimals": decimals,
+                    "total_supply": total_supply,
+                    "total_supply_human": total_supply / (10 ** decimals),
                     "address": checksum_address,
-                    "is_contract": True
+                    "is_contract": True,
+                    "network": "Ethereum Mainnet"
                 }
                 logger.info(f"✅ SELA Token Contract: {symbol} ({name}) - Decimals: {decimals}")
                 
             except Exception as e:
                 logger.warning(f"⚠️ Contract exists but ABI may not match: {e}")
-                # נשתמש בערכים ברירת מחדל
                 token_info = {
                     "symbol": "SELA",
                     "name": "SELA Token", 
                     "decimals": 18,
                     "address": checksum_address,
                     "is_contract": True,
+                    "network": "Ethereum Mainnet",
                     "abi_warning": True
                 }
         else:
-            logger.warning(f"⚠️ SELA contract address is not a contract, using fallback mode")
+            logger.warning(f"⚠️ SELA contract address is not a contract")
             token_info = {
                 "symbol": "SELA",
                 "name": "SELA Token",
                 "decimals": 18,
                 "address": checksum_address,
-                "is_contract": False
+                "is_contract": False,
+                "network": "Ethereum Mainnet"
             }
             
     except Exception as e:
@@ -156,6 +162,9 @@ if w3 and SELA_TOKEN_ADDRESS:
         token_info = {"error": str(e)}
 else:
     logger.error("❌ Web3 or token address not available")
+
+# HTTP client for Etherscan API
+etherscan_client = httpx.AsyncClient(timeout=30.0)
 
 # Data storage
 DATA_DIR = "data"
@@ -230,49 +239,87 @@ def verify_admin_token(x_admin_token: str = Header(None)):
         )
     return True
 
+async def get_eth_balance_etherscan(address: str) -> float:
+    """קבלת יתרת ETH דרך Etherscan API"""
+    try:
+        url = f"https://api.etherscan.io/api"
+        params = {
+            "module": "account",
+            "action": "balance",
+            "address": address,
+            "tag": "latest",
+            "apikey": ETHERSCAN_API_KEY
+        }
+        
+        response = await etherscan_client.get(url, params=params)
+        data = response.json()
+        
+        if data["status"] == "1":
+            balance_wei = int(data["result"])
+            balance_eth = balance_wei / (10 ** 18)
+            return balance_eth
+        else:
+            logger.error(f"Etherscan API error: {data['message']}")
+            return 0.0
+            
+    except Exception as e:
+        logger.error(f"Error getting ETH balance from Etherscan: {e}")
+        return 0.0
+
 def get_sela_balance(address: str) -> float:
-    """קבלת יתרת SELA - עם fallback אם החוזה לא עובד"""
-    if not w3:
+    """קבלת יתרת SELA"""
+    if not w3 or not token_contract:
         return 0.0
     
     try:
         checksum_address = Web3.to_checksum_address(address)
-        
-        if token_contract:
-            # נסה לקבל יתרה מהחוזה האמיתי
-            try:
-                balance = token_contract.functions.balanceOf(checksum_address).call()
-                decimals = token_info.get("decimals", 18)
-                human_balance = balance / (10 ** decimals)
-                logger.info(f"✅ Real SELA balance for {address}: {human_balance}")
-                return human_balance
-            except Exception as e:
-                logger.warning(f"⚠️ Could not get real SELA balance: {e}")
-        
-        # Fallback - בדיקה אם יש טוקנים בכתובת (לדוגמה בלבד)
-        # במציאות, כאן תהיה הלוגיקה האמיתית לבדיקת יתרות
-        logger.info(f"🔍 Checking wallet {checksum_address} for SELA tokens")
-        
-        # לדוגמה - נחזיר 0 כרגע
-        return 0.0
-        
+        balance = token_contract.functions.balanceOf(checksum_address).call()
+        decimals = token_info.get("decimals", 18)
+        human_balance = balance / (10 ** decimals)
+        logger.info(f"✅ SELA balance for {address}: {human_balance}")
+        return human_balance
     except Exception as e:
         logger.error(f"Error getting SELA balance for {address}: {e}")
         return 0.0
 
-def get_bnb_balance(address: str) -> float:
-    """קבלת יתרת BNB"""
-    if not w3:
-        return 0.0
-    
+async def get_transaction_history(address: str, limit: int = 5):
+    """קבלת היסטוריית עסקאות מ-Etherscan"""
     try:
-        checksum_address = Web3.to_checksum_address(address)
-        balance = w3.eth.get_balance(checksum_address)
-        bnb_balance = balance / (10 ** 18)  # BNB has 18 decimals
-        return bnb_balance
+        url = "https://api.etherscan.io/api"
+        params = {
+            "module": "account",
+            "action": "txlist",
+            "address": address,
+            "startblock": 0,
+            "endblock": 99999999,
+            "page": 1,
+            "offset": limit,
+            "sort": "desc",
+            "apikey": ETHERSCAN_API_KEY
+        }
+        
+        response = await etherscan_client.get(url, params=params)
+        data = response.json()
+        
+        if data["status"] == "1":
+            transactions = []
+            for tx in data["result"][:limit]:
+                transactions.append({
+                    "hash": tx["hash"],
+                    "from": tx["from"],
+                    "to": tx["to"],
+                    "value": f"{int(tx['value']) / (10 ** 18):.6f} ETH",
+                    "timestamp": time.strftime('%Y-%m-%d %H:%M:%S', time.gmtime(int(tx['timeStamp']))),
+                    "status": "confirmed" if tx["isError"] == "0" else "failed"
+                })
+            return transactions
+        else:
+            logger.warning(f"Etherscan transactions error: {data['message']}")
+            return []
+            
     except Exception as e:
-        logger.error(f"Error getting BNB balance for {address}: {e}")
-        return 0.0
+        logger.error(f"Error getting transactions from Etherscan: {e}")
+        return []
 
 def get_token_info_safe():
     """קבלת מידע על הטוקן"""
@@ -291,7 +338,8 @@ async def root():
     return {
         "message": "SLH API - SELA Community Trading System", 
         "status": "operational",
-        "version": "2.0.0",
+        "version": "3.0.0",
+        "network": "Ethereum Mainnet",
         "web3_connected": w3 and w3.is_connected(),
         "token_contract_ready": token_contract is not None
     }
@@ -304,6 +352,7 @@ async def health_check():
         "status": "healthy" if web3_status else "degraded",
         "web3_connected": web3_status,
         "chain_id": w3.eth.chain_id if w3 else None,
+        "network": "Ethereum Mainnet",
         "token_info": token_info,
         "service": "SLH API"
     }
@@ -362,14 +411,14 @@ async def update_price(
 
 @app.get("/wallet/balance/{address}")
 async def get_wallet_balance(address: str):
-    """קבלת כל המידע על הארנק - SELA + BNB"""
+    """קבלת כל המידע על הארנק - SELA + ETH"""
     logger.info(f"GET /wallet/balance/{address} called")
     
     if not w3:
         return {
             "error": "Web3 not connected", 
             "sela_balance": 0,
-            "bnb_balance": 0,
+            "eth_balance": 0,
             "sela_value_nis": 0,
             "price_nis": config_data["price_nis"]
         }
@@ -378,7 +427,7 @@ async def get_wallet_balance(address: str):
         return {
             "error": "Invalid address format",
             "sela_balance": 0,
-            "bnb_balance": 0,
+            "eth_balance": 0,
             "sela_value_nis": 0,
             "price_nis": config_data["price_nis"]
         }
@@ -388,26 +437,49 @@ async def get_wallet_balance(address: str):
         
         # קבלת יתרות
         sela_balance = get_sela_balance(checksum_address)
-        bnb_balance = get_bnb_balance(checksum_address)
+        eth_balance = await get_eth_balance_etherscan(checksum_address)
         sela_value_nis = sela_balance * config_data["price_nis"]
         
         return {
             "address": checksum_address,
             "sela_balance": round(sela_balance, 6),
-            "bnb_balance": round(bnb_balance, 6),
+            "eth_balance": round(eth_balance, 6),
             "sela_value_nis": round(sela_value_nis, 2),
             "price_nis": config_data["price_nis"],
-            "token_info": token_info
+            "token_info": token_info,
+            "network": "Ethereum Mainnet"
         }
     except Exception as e:
         logger.error(f"Error getting wallet balance for {address}: {e}")
         return {
             "error": str(e),
             "sela_balance": 0,
-            "bnb_balance": 0,
+            "eth_balance": 0,
             "sela_value_nis": 0,
             "price_nis": config_data["price_nis"]
         }
+
+@app.get("/wallet/transactions/{address}")
+async def get_wallet_transactions(address: str, limit: int = 5):
+    """קבלת היסטוריית עסקאות"""
+    logger.info(f"GET /wallet/transactions/{address} called")
+    
+    if not Web3.is_address(address):
+        return {"error": "Invalid address format"}
+    
+    try:
+        checksum_address = Web3.to_checksum_address(address)
+        transactions = await get_transaction_history(checksum_address, limit)
+        
+        return {
+            "address": checksum_address,
+            "transactions": transactions,
+            "count": len(transactions),
+            "network": "Ethereum Mainnet"
+        }
+    except Exception as e:
+        logger.error(f"Error getting transactions for {address}: {e}")
+        return {"error": str(e)}
 
 @app.get("/token/info")
 async def get_token_info():
@@ -491,9 +563,12 @@ async def debug_token():
             "has_contract_code": has_code,
             "code_length": len(code),
             "chain_id": w3.eth.chain_id,
+            "network": "Ethereum Mainnet",
             "token_info": token_info
         }
     except Exception as e:
         return {"error": str(e)}
 
 logger.info("✅ All routes registered successfully")
+
+# No uvicorn.run here - Railway handles this
