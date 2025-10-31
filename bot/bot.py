@@ -18,7 +18,6 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from fastapi import FastAPI, Request
 import uvicorn
-import time
 
 # הגדרת לוגר
 logging.basicConfig(
@@ -84,7 +83,7 @@ class SLHBot:
         return ReplyKeyboardMarkup([
             [KeyboardButton("💎 מחיר"), KeyboardButton("👛 ארנק")],
             [KeyboardButton("🔓 הצטרפות"), KeyboardButton("📊 סטטוס")],
-            [KeyboardButton("❓ תמיכה"), KeyboardButton("🎯 הדרכה")]
+            [KeyboardButton("🔄 עסקאות"), KeyboardButton("❓ תמיכה")]
         ], resize_keyboard=True)
 
     def get_admin_keyboard(self):
@@ -107,7 +106,7 @@ class SLHBot:
             # קבלת מחיר עדכני מה-API
             price_response = await client.get(f"{SLH_API_BASE}/config/price")
             price_data = price_response.json()
-            sela_price = price_data.get("price_nis", 444.0)  # שינוי מ� sela_price_nis ל-price_nis
+            sela_price = price_data.get("price_nis", 444.0)
             
             welcome_text = f"""
 🎉 **ברוך הבא לקהילת SELA!** 🎉
@@ -119,7 +118,7 @@ class SLHBot:
 **🚀 ההטבות שמחכות לך לאחר ההצטרפות:**
 
 ✅ **גישה לקהילת עסקים אקסקלוסיבית**
-✅ **פלטפורמת מסחר למכירת SELA במחיר אישי**
+✅ **פלטפורמת מסחר למכירת SELA במחיר אישי** 
 ✅ **ניהול תיק השקעות מתקדם**
 ✅ **עדכונים שוטפים והזדמנויות עסקיות**
 ✅ **תמיכה טכנית מלאה**
@@ -148,7 +147,8 @@ class SLHBot:
 
 **פקודות עיקריות:**
 • `💎 מחיר` - הצג מחיר SELA נוכחי
-• `👛 ארנק` - הצג יתרת SELA בארנק
+• `👛 ארנק` - הצג יתרות SELA + ETH בארנק
+• `🔄 עסקאות` - הצג היסטוריית עסקאות
 • `🔓 הצטרפות` - הוראות הצטרפות לקהילה
 • `📊 סטטוס` - בדיקת סטטוס המערכת
 
@@ -159,7 +159,7 @@ class SLHBot:
 
 **דוגמאות:**
 `/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`
-`/unlock_verify TX123456789`
+`/transactions 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`
 
 **תמיכה:**
 לחץ '❓ תמיכה' לעזרה נוספת
@@ -179,7 +179,7 @@ class SLHBot:
         try:
             response = await client.get(f"{SLH_API_BASE}/config/price")
             price_data = response.json()
-            sela_price = price_data.get("price_nis", 444.0)  # שינוי מ� sela_price_nis ל-price_nis
+            sela_price = price_data.get("price_nis", 444.0)
             
             price_text = f"""
 💎 **מחיר SELA נוכחי:**
@@ -187,6 +187,8 @@ class SLHBot:
 💰 **{sela_price} ₪** לשקל
 
 המחיר מתעדכן באופן שוטף לפי תנאי השוק.
+
+🌐 **רשת:** Ethereum Mainnet
             """
             
             await update.message.reply_text(
@@ -203,14 +205,14 @@ class SLHBot:
             )
 
     async def wallet_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """פקודת /wallet"""
+        """פקודת /wallet מעודכנת עם ETH"""
         if not self.initialized:
             await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
             return
             
         if not context.args:
             await update.message.reply_text(
-                "👛 **רישום ארנק**\n\nשלח את כתובת ה-MetaMask או Trust Wallet שלך בפורמט:\n\n`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`\n\nאו לחץ על '👛 ארנק' והזן את הכתובת.",
+                "👛 **רישום ארנק**\n\nשלח את כתובת ה-MetaMask או Trust Wallet שלך בפורמט:\n\n`/wallet 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`",
                 parse_mode=ParseMode.MARKDOWN,
                 reply_markup=self.get_main_keyboard()
             )
@@ -219,7 +221,8 @@ class SLHBot:
         wallet_address = context.args[0]
         
         try:
-            response = await client.get(f"{SLH_API_BASE}/token/balance/{wallet_address}")
+            # שימוש ב-endpoint החדש
+            response = await client.get(f"{SLH_API_BASE}/wallet/balance/{wallet_address}")
             balance_data = response.json()
             
             if "error" in balance_data:
@@ -229,25 +232,29 @@ class SLHBot:
                 )
                 return
             
-            balance = balance_data.get("balance_sela", 0)  # שינוי מ-balance ל-balance_sela
-            symbol = "SELA"
+            sela_balance = balance_data.get("sela_balance", 0)
+            eth_balance = balance_data.get("eth_balance", 0)
+            sela_value_nis = balance_data.get("sela_value_nis", 0)
+            price_nis = balance_data.get("price_nis", 444.0)
             
-            # קבלת מחיר נוכחי
-            price_response = await client.get(f"{SLH_API_BASE}/config/price")
-            price_data = price_response.json()
-            sela_price = price_data.get("price_nis", 444.0)
-            
-            # חישוב ערך בשקלים
-            value_nis = balance * sela_price
-            
+            # הודעה מעודכנת עם ETH
             balance_text = f"""
-👛 **יתרת {symbol}**
+👛 **יתרות הארנק**
 
 📍 **כתובת:** `{wallet_address}`
-💎 **יתרה:** {balance:,.2f} {symbol}
-💰 **ערך נוכחי:** {value_nis:,.2f} ₪
 
-💡 *מחיר {symbol}: {sela_price} ₪*
+💎 **SELA:**
+   • **יתרה:** {sela_balance:,.6f} SELA
+   • **ערך נוכחי:** {sela_value_nis:,.2f} ₪
+   • **מחיר SELA:** {price_nis} ₪
+
+🪙 **ETH:**
+   • **יתרה:** {eth_balance:,.6f} ETH
+   • **לכיסוי עמלות עסקאות**
+
+🌐 **רשת:** Ethereum Mainnet
+
+💡 *יתרת ETH נדרשת לביצוע עסקאות ברשת Ethereum*
             """
             
             await update.message.reply_text(
@@ -262,6 +269,121 @@ class SLHBot:
                 "⚠️ שגיאה בקבלת יתרת הארנק. ודא שהכתובת תקינה ונסה שוב.",
                 reply_markup=self.get_main_keyboard()
             )
+
+    async def transactions_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /transactions להיסטוריית עסקאות"""
+        if not self.initialized:
+            await update.message.reply_text("⚠️ הבוט בתהליך אתחול. נסה שוב בעוד כמה דקות.")
+            return
+            
+        if not context.args:
+            await update.message.reply_text(
+                "🔄 **היסטוריית עסקאות**\n\nשלח כתובת ארנק לצפייה בעסקאות אחרונות:\n\n`/transactions 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
+            return
+        
+        wallet_address = context.args[0]
+        limit = int(context.args[1]) if len(context.args) > 1 else 5
+        
+        try:
+            response = await client.get(f"{SLH_API_BASE}/wallet/transactions/{wallet_address}?limit={limit}")
+            tx_data = response.json()
+            
+            if "error" in tx_data:
+                await update.message.reply_text(
+                    f"❌ שגיאה: {tx_data['error']}",
+                    reply_markup=self.get_main_keyboard()
+                )
+                return
+            
+            transactions = tx_data.get("transactions", [])
+            
+            if not transactions:
+                tx_text = f"""
+🔄 **היסטוריית עסקאות**
+
+📍 **כתובת:** `{wallet_address}`
+📊 **נמצאו:** 0 עסקאות
+
+💡 *לא נמצאו עסקאות אחרונות לכתובת זו*
+                """
+            else:
+                tx_text = f"""
+🔄 **היסטוריית עסקאות**
+
+📍 **כתובת:** `{wallet_address}`
+📊 **נמצאו:** {len(transactions)} עסקאות אחרונות
+
+"""
+                for i, tx in enumerate(transactions, 1):
+                    tx_text += f"""
+**#{i}** - {tx['timestamp']}
+• **מאת:** `{tx['from'][:10]}...{tx['from'][-8:]}`
+• **אל:** `{tx['to'][:10]}...{tx['to'][-8:]}`
+• **סכום:** {tx['value']}
+• **סטטוס:** {tx['status']}
+• **Hash:** `{tx['hash'][:15]}...`
+"""
+            
+            tx_text += f"\n🌐 **רשת:** Ethereum Mainnet"
+            
+            await update.message.reply_text(
+                tx_text, 
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
+            
+        except Exception as e:
+            logger.error(f"Error getting transactions: {e}")
+            await update.message.reply_text(
+                "⚠️ שגיאה בקבלת היסטוריית עסקאות. נסה שוב מאוחר יותר.",
+                reply_markup=self.get_main_keyboard()
+            )
+
+    async def eth_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """פקודת /eth לבדיקת יתרת ETH"""
+        if not context.args:
+            await update.message.reply_text(
+                "🪙 **בדיקת ETH**\n\nשלח כתובת ארנק לבדיקת יתרת ETH:\n\n`/eth 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`",
+                parse_mode=ParseMode.MARKDOWN
+            )
+            return
+        
+        wallet_address = context.args[0]
+        
+        try:
+            response = await client.get(f"{SLH_API_BASE}/wallet/balance/{wallet_address}")
+            balance_data = response.json()
+            
+            if "error" in balance_data:
+                await update.message.reply_text(f"❌ שגיאה: {balance_data['error']}")
+                return
+            
+            eth_balance = balance_data.get("eth_balance", 0)
+            
+            eth_text = f"""
+🪙 **יתרת ETH**
+
+📍 **כתובת:** `{wallet_address}`
+💰 **יתרה:** {eth_balance:,.6f} ETH
+
+💡 **ETH נדרש עבור:**
+• העברת SELA לאחרים
+• אישור עסקאות
+• תשלום עמלות גז
+
+🌐 **רשת:** Ethereum Mainnet
+
+📊 **מומלץ:** לפחות 0.01 ETH בארנק
+            """
+            
+            await update.message.reply_text(eth_text, parse_mode=ParseMode.MARKDOWN)
+            
+        except Exception as e:
+            logger.error(f"Error getting ETH balance: {e}")
+            await update.message.reply_text("⚠️ שגיאה בקבלת יתרת ETH")
 
     async def unlock39_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """פקודת /unlock39 משודרגת"""
@@ -385,10 +507,14 @@ class SLHBot:
             await self.unlock39_command(update, context)
         elif text == "📊 סטטוס":
             await self.status_command(update, context)
+        elif text == "🔄 עסקאות":
+            await update.message.reply_text(
+                "🔄 **היסטוריית עסקאות**\n\nשלח כתובת ארנק לצפייה בעסקאות אחרונות:\n\n`/transactions 0x742EfA6c6D2876E8700c5A0e2b0e2e1C5c3A1B2f`",
+                parse_mode=ParseMode.MARKDOWN,
+                reply_markup=self.get_main_keyboard()
+            )
         elif text == "❓ תמיכה":
             await self.support_command(update, context)
-        elif text == "🎯 הדרכה":
-            await self.help_command(update, context)
         elif text == "🏠 תפריט ראשי":
             await update.message.reply_text(
                 "🏠 **תפריט ראשי**",
@@ -413,6 +539,7 @@ class SLHBot:
 • בעיית חיבור לבוט
 • שגיאה בהצגת יתרה
 • בעיית אישור תשלום
+• בעיות עם ארנק
 
 **נושאים כלליים:**
 • הסבר על הקהילה
@@ -420,6 +547,8 @@ class SLHBot:
 • הצעות לשיפור
 
 **שעות פעילות:** 24/7
+
+🌐 **רשת:** Ethereum Mainnet
 
 נשמח לעזור בכל שאלה! 😊
 """
@@ -554,11 +683,18 @@ class SLHBot:
             
             unlock_status = "🟢 מאושר" if status.get("unlocked") else "🟡 ממתין" if status.get("pending") else "🔴 לא מאושר"
             
+            # קבלת מידע על הרשת
+            health_data = health_response.json()
+            network = health_data.get("network", "Ethereum Mainnet")
+            web3_status = "🟢 מחובר" if health_data.get("web3_connected") else "🔴 מנותק"
+            
             status_text = f"""
 📊 **סטטוס מערכת**
 
 🤖 **בוט:** 🟢 פעיל
 🔗 **API:** {api_status}
+🌐 **רשת:** {network}
+🔗 **Web3:** {web3_status}
 🔓 **סטטוס Unlock:** {unlock_status}
 
 💡 **פרטים:**
@@ -634,7 +770,7 @@ class SLHBot:
             return
             
         if update.effective_chat.id != ADMIN_CHAT_ID:
-            await update.message.reply_text("❌ גישה נדחתה - מנהל בלבד.")
+            await update.message.reply_text("❌ גישה נדחתה - מנ�יאל בלבד.")
             return
         
         if not context.args:
@@ -684,6 +820,8 @@ class SLHBot:
         self.application.add_handler(CommandHandler("help", self.help_command))
         self.application.add_handler(CommandHandler("price", self.price_command))
         self.application.add_handler(CommandHandler("wallet", self.wallet_command))
+        self.application.add_handler(CommandHandler("transactions", self.transactions_command))
+        self.application.add_handler(CommandHandler("eth", self.eth_command))
         self.application.add_handler(CommandHandler("unlock39", self.unlock39_command))
         self.application.add_handler(CommandHandler("unlock_verify", self.unlock_verify_command))
         self.application.add_handler(CommandHandler("join", self.join_command))
@@ -711,87 +849,4 @@ class SLHBot:
             await self.application.bot.set_webhook(webhook_url)
             logger.info(f"✅ Webhook set to: {webhook_url}")
         except Exception as e:
-            logger.error(f"❌ Error setting webhook: {e}")
-
-    async def initialize(self):
-        """אתחול הבוט"""
-        if not self.is_configured:
-            logger.error("❌ Bot not configured - missing required environment variables")
-            return False
-            
-        try:
-            self.application = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
-            self.setup_handlers()
-            
-            # אתחול האפליקציה - זה מה שהיה חסר!
-            await self.application.initialize()
-            
-            await self.setup_webhook()
-            self.initialized = True
-            logger.info("✅ Bot initialized successfully")
-            return True
-        except Exception as e:
-            logger.error(f"❌ Error initializing bot: {e}")
-            return False
-
-# יצירת instance גלובלי של הבוט
-bot_instance = SLHBot()
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    """Endpoint לקבלת עדכונים מטלגרם"""
-    if not bot_instance.initialized:
-        logger.error("❌ Bot not initialized yet")
-        return {"status": "error", "message": "Bot not initialized"}
-    
-    try:
-        json_data = await request.json()
-        logger.info(f"📨 Received webhook update for chat: {json_data.get('message', {}).get('chat', {}).get('id')}")
-        update = Update.de_json(json_data, bot_instance.application.bot)
-        await bot_instance.application.process_update(update)
-        return {"status": "ok"}
-    except Exception as e:
-        logger.error(f"Error in webhook: {e}")
-        return {"status": "error", "message": str(e)}
-
-@app.get("/health")
-async def health_check():
-    """Health check endpoint"""
-    return {
-        "status": "healthy", 
-        "service": "SLH Bot",
-        "configured": bot_instance.is_configured,
-        "initialized": bot_instance.initialized
-    }
-
-@app.get("/")
-async def root():
-    """Root endpoint"""
-    return {
-        "message": "SLH Bot is running",
-        "webhook_url": f"{PUBLIC_BOT_BASE}/webhook",
-        "configured": bot_instance.is_configured,
-        "initialized": bot_instance.initialized,
-        "status": "ready" if bot_instance.initialized else "initializing"
-    }
-
-async def main():
-    """פונקציה ראשית"""
-    success = await bot_instance.initialize()
-    if not success:
-        logger.error("❌ Failed to initialize bot. Check environment variables.")
-        return
-    
-    # הרצת שרת FastAPI
-    config = uvicorn.Config(
-        app, 
-        host="0.0.0.0", 
-        port=PORT,
-        log_level="info"
-    )
-    server = uvicorn.Server(config)
-    logger.info(f"✅ Starting webhook server on port {PORT}")
-    await server.serve()
-
-if __name__ == "__main__":
-    asyncio.run(main())
+            logger.error(f"❌ Error setting webhook
