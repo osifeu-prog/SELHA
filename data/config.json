@@ -1,0 +1,25 @@
+{
+  "sela_price_ils": 444.50,
+  "unlock_price_ils": 39.0,
+  "unlock_price_sela": 0.087838,
+  "staking_apy": 15.0,
+  "trading_fee": 0.001,
+  "network": "BSC",
+  "rpc_url": "https://bsc-dataseed.binance.org/",
+  "sela_token_address": "0xACb0A09414CEA1C879c67bB7A877E4e19480f022",
+  "chain_id": 56,
+  "explorer_url": "https://bscscan.com",
+  "real_balances": {
+    "0xD0617B54FB4b6b66307846f217b4D685800E3dA4": {
+      "bnb": 0.004265,
+      "sela": 845.75,
+      "registered": true
+    },
+    "0x742E6f70B6c6E79763e1d7e5c5C3c9c5d6A1b3c2": {
+      "bnb": 0.125,
+      "sela": 1500.50,
+      "registered": true
+    }
+  },
+  "last_updated": "2025-11-05T19:30:00Z"
+}

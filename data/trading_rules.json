@@ -1,0 +1,17 @@
+{
+  "min_trade_amounts": {
+    "SELA_BNB": 0.1,
+    "SELA_USD": 1.0
+  },
+  "price_precision": {
+    "SELA_BNB": 6,
+    "SELA_USD": 2
+  },
+  "amount_precision": {
+    "SELA_BNB": 2,
+    "SELA_USD": 2
+  },
+  "trading_hours": "24/7",
+  "max_orders_per_user": 100,
+  "order_timeout_hours": 24
+}
